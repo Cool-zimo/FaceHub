@@ -518,3 +518,28 @@ code {
 .bubble.locked {
     background: #fff3cd; color: #78350f; font-style: italic;
 }
+
+/* ═══ 安全码 / MITM 警告 ══════════════════════════════ */
+.e2e-bar.danger {
+    background: #fde8e8; color: #8a0d16;
+    border-top: 1px solid #f5c2c2;
+}
+.safety-num {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px; letter-spacing: .5px;
+    background: rgba(255, 255, 255, .75);
+    padding: 2px 8px; border-radius: 4px;
+    margin: 0 4px; user-select: all;
+}
+.e2e-btn {
+    margin-left: 8px; padding: 3px 10px;
+    font-size: 11.5px; font-weight: 600;
+    background: rgba(255, 255, 255, .9);
+    border: 1px solid currentColor; border-radius: 4px;
+    color: inherit; cursor: pointer; font-family: inherit;
+}
+.e2e-btn:hover { background: #fff; }
+.e2e-tip {
+    margin-top: 5px; font-size: 11.5px; opacity: .85; line-height: 1.45;
+}
