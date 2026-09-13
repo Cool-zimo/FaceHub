@@ -10,6 +10,7 @@
     var API = global.API;
     var Store = global.Store;
     var Timeline = global.Timeline;
+    var Chat = global.Chat;
 
     // 与 drive / 仓鼠 共用的令牌存储位置（三边令牌互认）
     var TOKEN_KEYS = ['facehub.token', 'github_drive_token', 'cangshu.token'];
@@ -155,6 +156,21 @@
             document.getElementById('follow-input').addEventListener('keydown', function (e) {
                 if (e.key === 'Enter') self.addFollow();
             });
+
+            // ── 私聊 ──
+            document.getElementById('new-chat-btn').onclick = function () {
+                var box = document.getElementById('chat-new');
+                box.style.display = box.style.display === 'none' ? '' : 'none';
+                if (box.style.display === '') document.getElementById('chat-peer').focus();
+            };
+            document.getElementById('chat-start-btn').onclick = function () { self.startChat(); };
+            document.getElementById('chat-peer').addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') self.startChat();
+            });
+            document.getElementById('chat-send-btn').onclick = function () { self.sendChat(); };
+            document.getElementById('chat-input').addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') self.sendChat();
+            });
         },
 
         renderMe() {
@@ -177,13 +193,248 @@
             document.querySelectorAll('.tab, .side-item').forEach(function (b) {
                 b.classList.toggle('active', b.getAttribute('data-view') === view);
             });
-            var composer = document.getElementById('composer-box');
-            composer.style.display = (view === 'timeline' || view === 'profile') ? '' : 'none';
+
+            var isChat = (view === 'chats');
+
+            // 私聊是全宽两栏，和常规三栏互斥。
+            // 注意 col-right 也要隐藏，否则右栏会挤在私聊视图旁边。
+            var layout = document.querySelector('.layout');
+            layout.classList.toggle('chat-mode', isChat);
+
+            document.getElementById('chats-view').style.display = isChat ? '' : 'none';
+            document.querySelector('.col-left').style.display = isChat ? 'none' : '';
+            document.querySelector('.col-right').style.display = isChat ? 'none' : '';
+            document.querySelector('.col-main').style.display = isChat ? 'none' : '';
+            document.getElementById('composer-box').style.display =
+                (!isChat && (view === 'timeline' || view === 'profile')) ? '' : 'none';
+
+            if (isChat) { this.loadChats(); return; }
 
             if (view === 'timeline') this.loadTimeline();
             else if (view === 'profile') this.loadProfile();
             else if (view === 'discover') this.loadDiscover();
             else this.loadAbout();
+        },
+
+        // ── 私聊 ───────────────────────────────────────────────
+
+        currentRoom: null,
+
+        async loadChats() {
+            var self = this;
+            var list = document.getElementById('room-list');
+            var inviteBox = document.getElementById('invite-box');
+            list.innerHTML = '<div class="empty-hint" style="padding:14px">载入中…</div>';
+
+            // 待接受邀请（对方发起的会话）
+            try {
+                var invs = await Chat.invitations();
+                if (invs.length) {
+                    inviteBox.style.display = '';
+                    inviteBox.innerHTML = '<h4>🔔 有人想和你私聊</h4>';
+                    invs.forEach(function (inv) {
+                        inviteBox.appendChild(self.inviteEl(inv));
+                    });
+                    this.setBadge(invs.length);
+                } else {
+                    inviteBox.style.display = 'none';
+                    this.setBadge(0);
+                }
+            } catch (e) {
+                inviteBox.style.display = 'none';
+            }
+
+            try {
+                var rooms = await Chat.listRooms();
+                list.innerHTML = '';
+                if (!rooms.length) {
+                    list.innerHTML = '<div class="empty-hint" style="padding:14px">' +
+                        '还没有会话。点上面「+ 新会话」找人聊聊。</div>';
+                    return;
+                }
+                rooms.forEach(function (r) { list.appendChild(self.roomEl(r)); });
+            } catch (e) {
+                list.innerHTML = '<div class="empty-hint" style="padding:14px;color:#cf222e">' +
+                    '载入失败：' + self.esc(e.message) + '</div>';
+            }
+            this.updateQuota();
+        },
+
+        inviteEl(inv) {
+            var self = this;
+            var row = document.createElement('div');
+            row.className = 'invite-row';
+            var img = document.createElement('img');
+            img.src = 'https://github.com/' + inv.peer + '.png?size=60';
+            img.alt = '';
+            var who = document.createElement('span');
+            who.className = 'who';
+            who.textContent = inv.peer;
+
+            var acc = document.createElement('button');
+            acc.className = 'inv-accept';
+            acc.textContent = '接受';
+            acc.onclick = async function () {
+                acc.disabled = true;
+                try {
+                    await Chat.accept(inv.id);
+                    self.toast('已接受 ' + inv.peer + ' 的私聊');
+                    await self.loadChats();
+                    // 接受后直接打开这个会话
+                    var rooms = await Chat.listRooms();
+                    var hit = rooms.filter(function (r) { return r.name === inv.name; })[0];
+                    if (hit) self.openRoom(hit);
+                } catch (e) {
+                    self.toast('接受失败：' + e.message, true);
+                    acc.disabled = false;
+                }
+            };
+
+            var dec = document.createElement('button');
+            dec.className = 'inv-decline';
+            dec.textContent = '忽略';
+            dec.onclick = async function () {
+                try {
+                    await Chat.decline(inv.id);
+                    await self.loadChats();
+                } catch (e) { self.toast(e.message, true); }
+            };
+
+            row.appendChild(img);
+            row.appendChild(who);
+            row.appendChild(acc);
+            row.appendChild(dec);
+            return row;
+        },
+
+        roomEl(room) {
+            var self = this;
+            var row = document.createElement('button');
+            row.className = 'room-row';
+            if (this.currentRoom && this.currentRoom.name === room.name) row.classList.add('active');
+            row.innerHTML =
+                '<img src="https://github.com/' + this.esc(room.peer) + '.png?size=92" alt="">' +
+                '<div class="info"><div class="nm">' + this.esc(room.peer) + '</div>' +
+                '<div class="sub">' + this.timeAgo(new Date(room.updatedAt).getTime()) +
+                (room.private ? ' · 🔒 私密' : '') + '</div></div>';
+            row.onclick = function () { self.openRoom(room); };
+            return row;
+        },
+
+        async openRoom(room) {
+            this.currentRoom = room;
+            document.querySelectorAll('.room-row').forEach(function (r) {
+                r.classList.toggle('active', r.querySelector('.nm').textContent === room.peer);
+            });
+            document.getElementById('chats-view').classList.add('show-chat');
+
+            document.getElementById('chat-head').style.display = '';
+            document.getElementById('chat-peer-name').textContent = room.peer;
+            document.getElementById('chat-peer-avatar').src =
+                'https://github.com/' + room.peer + '.png?size=80';
+            document.getElementById('chat-peer-sub').textContent =
+                room.private ? '🔒 私密仓库 · ' + room.name : room.name;
+
+            document.getElementById('chat-input-box').style.display = '';
+
+            var box = document.getElementById('chat-messages');
+            box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center">载入中…</div>';
+
+            try {
+                var msgs = await Chat.messages(room.owner, room.name);
+                this.renderMessages(msgs);
+            } catch (e) {
+                box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;color:#cf222e">' +
+                    '载入失败：' + this.esc(e.message) + '</div>';
+            }
+            this.updateQuota();
+        },
+
+        renderMessages(msgs) {
+            var box = document.getElementById('chat-messages');
+            var myLogin = Store.me.login;
+            box.innerHTML = '';
+            if (!msgs.length) {
+                box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center">' +
+                    '还没有消息。说第一句话吧。</div>';
+                return;
+            }
+            var self = this;
+            msgs.forEach(function (m) {
+                var mine = m.from.toLowerCase() === myLogin.toLowerCase();
+                var row = document.createElement('div');
+                row.className = 'bubble-row' + (mine ? ' mine' : '');
+
+                var img = document.createElement('img');
+                img.src = m.avatar || ('https://github.com/' + m.from + '.png?size=56');
+                img.alt = '';
+                row.appendChild(img);
+
+                var b = document.createElement('div');
+                b.className = 'bubble';
+                b.textContent = m.text;
+                row.appendChild(b);
+                box.appendChild(row);
+
+                var meta = document.createElement('div');
+                meta.className = 'bubble-meta';
+                meta.textContent = (mine ? '你' : m.from) + ' · ' + self.timeAgo(m.ts);
+                box.appendChild(meta);
+            });
+            box.scrollTop = box.scrollHeight;
+        },
+
+        async startChat() {
+            var input = document.getElementById('chat-peer');
+            var peer = (input.value || '').trim();
+            if (!peer) return;
+            var btn = document.getElementById('chat-start-btn');
+            btn.disabled = true;
+            btn.textContent = '…';
+            try {
+                var room = await Chat.start(peer);
+                input.value = '';
+                document.getElementById('chat-new').style.display = 'none';
+                this.toast(room.existed ? '已有会话' : '会话已创建，已邀请 ' + peer);
+                await this.loadChats();
+                this.openRoom(room);
+            } catch (e) {
+                this.toast(e.message, true);
+            }
+            btn.disabled = false;
+            btn.textContent = '开始';
+            this.updateQuota();
+        },
+
+        async sendChat() {
+            var input = document.getElementById('chat-input');
+            var room = this.currentRoom;
+            if (!room) return;
+            var text = (input.value || '').trim();
+            if (!text) return;
+            var btn = document.getElementById('chat-send-btn');
+            btn.disabled = true;
+            input.value = '';
+            try {
+                await Chat.send(room.owner, room.name, text);
+                var msgs = await Chat.messages(room.owner, room.name, true);
+                this.renderMessages(msgs);
+                await this.loadChats();
+            } catch (e) {
+                this.toast('发送失败：' + e.message, true);
+                input.value = text;
+            }
+            btn.disabled = false;
+            this.updateQuota();
+        },
+
+        setBadge(n) {
+            ['chat-badge', 'chat-badge2'].forEach(function (id) {
+                var el = document.getElementById(id);
+                if (!el) return;
+                el.textContent = n;
+                el.style.display = n > 0 ? '' : 'none';
+            });
         },
 
         async loadTimeline() {
