@@ -143,10 +143,10 @@
       <div class="card">
         <h3 class="card-title">省流设计</h3>
         <ul class="principles">
-          <li>读内容走 <code>raw.githubusercontent.com</code>，<b>零 API 配额</b></li>
-          <li>列目录带 ETag，无更新返回 304，<b>也零配额</b></li>
-          <li>不维护索引文件，递归 tree 代替，写请求减半</li>
-          <li>每人只取最新 5 帖，请求数只与关注人数有关</li>
+          <li>内容存本地，二次打开 <b>零请求</b></li>
+          <li>读取带 ETag，无变化返回 304，<b>不计费</b></li>
+          <li>列目录同样走 ETag，没新帖也不计费</li>
+          <li>每人只取最新 5 帖，请求数与总帖数无关</li>
         </ul>
       </div>
     </aside>
