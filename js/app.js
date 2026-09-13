@@ -171,6 +171,43 @@
             document.getElementById('chat-input').addEventListener('keydown', function (e) {
                 if (e.key === 'Enter') self.sendChat();
             });
+
+            // ── 密钥备份 ──
+            document.getElementById('key-backup-btn').onclick = function () { self.openKeyModal(); };
+            document.getElementById('key-modal-close').onclick = function () { self.closeKeyModal(); };
+            document.getElementById('key-modal').addEventListener('click', function (e) {
+                if (e.target.id === 'key-modal') self.closeKeyModal();   // 点遮罩关闭
+            });
+            document.getElementById('key-gen-btn').onclick = function () { self.genBackup(); };
+            document.getElementById('key-copy-btn').onclick = function () { self.copyBackup(); };
+            document.getElementById('key-download-btn').onclick = function () { self.downloadBackup(); };
+            document.getElementById('key-import-btn').onclick = function () { self.doImportBackup(); };
+            document.querySelectorAll('.key-tab').forEach(function (t) {
+                t.onclick = function () {
+                    document.querySelectorAll('.key-tab').forEach(function (x) {
+                        x.classList.remove('active');
+                    });
+                    t.classList.add('active');
+                    var isExp = t.getAttribute('data-tab') === 'export';
+                    document.getElementById('key-export-pane').style.display = isExp ? '' : 'none';
+                    document.getElementById('key-import-pane').style.display = isExp ? 'none' : '';
+                };
+            });
+            document.getElementById('key-file').onchange = function (e) {
+                var f = e.target.files && e.target.files[0];
+                if (!f) return;
+                var fr = new FileReader();
+                fr.onload = function () {
+                    document.getElementById('key-import-text').value = String(fr.result || '');
+                };
+                fr.readAsText(f);
+            };
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape') {
+                    var m = document.getElementById('key-modal');
+                    if (m && m.style.display !== 'none') self.closeKeyModal();
+                }
+            });
         },
 
         renderMe() {
@@ -378,42 +415,29 @@
             this.updateQuota();
         },
 
-        /** 「核对安全码」按钮 */
-        bindVerify(room, e2e) {
-            var self = this;
-            var btn = document.getElementById('verify-btn');
-            if (!btn) return;
+        /** 安全码：点一下才展开，避免常态化的核对提示造成噪音 */
+        bindSafetyToggle() {
+            var btn = document.getElementById('sn-toggle');
+            var val = document.getElementById('sn-value');
+            if (!btn || !val) return;
             btn.onclick = function () {
-                if (!global.confirm(
-                    '你和 ' + room.peer + ' 屏幕上的安全码一致吗？\n\n' +
-                    '   ' + (e2e.safetyNumber || '') + '\n\n' +
-                    '只有当另一个人当面/电话告诉你同样的号码时，才点「确定」。\n' +
-                    '不一致 = 可能有人在中间窃听，不要点确定。'
-                )) return;
-                global.E2E.markVerified(Store.me.login, room.name, e2e.peerPub);
-                e2e.verified = true;
-                self.renderE2EStatus(e2e, room);
-                self.toast('已标记为核对通过');
+                var show = val.style.display === 'none';
+                val.style.display = show ? '' : 'none';
+                btn.textContent = show ? '隐藏' : '安全码';
             };
         },
 
-        /** 公钥变更后的「重新核对」 */
+        /** 公钥变更后的「知道了」 */
         bindReverify(room, e2e) {
             var self = this;
             var btn = document.getElementById('reverify-btn');
             if (!btn) return;
             btn.onclick = function () {
-                if (!global.confirm(
-                    '对方密钥已变更。\n\n' +
-                    '如果你知道 ' + room.peer + ' 刚换了设备/清了缓存，' +
-                    '可以重新核对新密钥：\n\n   ' + (e2e.safetyNumber || '') + '\n\n' +
-                    '确认无误后点「确定」。'
-                )) return;
                 global.E2E.markVerified(Store.me.login, room.name, e2e.peerPub);
                 e2e.verified = true;
                 e2e.pubKeyChanged = false;
                 self.renderE2EStatus(e2e, room);
-                self.toast('已重新核对');
+                self.toast('已记录新密钥');
             };
         },
 
@@ -428,31 +452,35 @@
                 input.parentNode.insertBefore(bar, input);
             }
             if (e2e && e2e.pubKeyChanged) {
-                // 已核对过的会话，公钥却变了 —— 最高优先级警告
-                bar.className = 'e2e-bar danger';
-                bar.innerHTML = '🚨 <b>安全警告：对方的密钥被更换了</b> · ' +
-                    '如果你确认 ' + this.esc(room.peer) + ' 没有换设备，' +
-                    '可能有人正在中间窃听。' +
-                    '<button id="reverify-btn" class="e2e-btn">重新核对</button>';
+                // 公钥变了。在"防外人"的威胁模型下，最常见原因是对方换设备/清缓存，
+                // 所以不弹红色警报 —— 那会制造狼来了。用中性提示 + 可展开的核对入口。
+                bar.className = 'e2e-bar warn';
+                bar.innerHTML = '🔑 <b>对方的密钥变了</b> · ' +
+                    '通常是 ' + this.esc(room.peer) + ' 换了设备或清了缓存。' +
+                    '<button id="reverify-btn" class="e2e-btn">知道了</button>';
                 this.bindReverify(room, e2e);
             } else if (e2e && e2e.ready) {
                 bar.className = 'e2e-bar ok';
-                var sn = e2e.safetyNumber ? '<code class="safety-num">' + e2e.safetyNumber + '</code>' : '';
+                // 安全码收进可展开区：它防的是"能写仓库的人"，
+                // 而那种人已经拿到 token 了，对多数场景不是主要威胁。
+                // 保留功能，但不占用主视觉。
+                var sn = e2e.safetyNumber
+                    ? '<button id="sn-toggle" class="e2e-btn">安全码</button>' +
+                      '<span id="sn-value" class="safety-num" style="display:none">' +
+                      e2e.safetyNumber + '</span>'
+                    : '';
                 if (e2e.verified) {
                     bar.innerHTML = '🔒 <b>端到端加密 · 已核对</b> ' + sn +
-                        ' · GitHub 只能看到密文';
+                        ' · GitHub 只存密文';
                 } else {
                     bar.innerHTML = '🔒 <b>端到端加密已启用</b> ' + sn +
-                        '<button id="verify-btn" class="e2e-btn">核对安全码</button>' +
-                        '<div class="e2e-tip">和 ' + this.esc(room.peer) +
-                        ' 线下（见面/电话）比对这串码是否一致。一致才算真的没有中间人。</div>';
-                    this.bindVerify(room, e2e);
+                        ' · GitHub 只存密文';
                 }
+                this.bindSafetyToggle();
             } else if (e2e && e2e.peerPubVanished) {
-                bar.className = 'e2e-bar danger';
-                bar.innerHTML = '🚨 <b>安全警告：对方的密钥消失了</b> · ' +
-                    '之前有，现在没了。可能是被删除以强制明文发送。' +
-                    '本会话将<b>明文</b>发送，请注意。';
+                bar.className = 'e2e-bar warn';
+                bar.innerHTML = '🔑 <b>对方的密钥暂时读不到</b> · ' +
+                    '本会话将<b>明文</b>发送。通常等对方上线一次就会恢复。';
             } else if (e2e && e2e.peerReady === false) {
                 bar.className = 'e2e-bar warn';
                 bar.innerHTML = '🔑 <b>等待对方上线交换密钥</b> · ' +
@@ -555,6 +583,83 @@
             }
             btn.disabled = false;
             this.updateQuota();
+        },
+
+        // ── 密钥备份 ─────────────────────────────────────────
+
+        openKeyModal() {
+            document.getElementById('key-modal').style.display = '';
+            var rooms = global.E2E.listBackedUpRooms();
+            document.getElementById('key-count').textContent =
+                rooms.length
+                    ? '本机已有 ' + rooms.length + ' 个会话的密钥：' + rooms.join('、')
+                    : '本机还没有任何密钥。打开一次会话就会生成。';
+        },
+
+        closeKeyModal() {
+            document.getElementById('key-modal').style.display = 'none';
+        },
+
+        async genBackup() {
+            var E2E = global.E2E;
+            if (!E2E) return this.toast('加密模块未加载', true);
+            try {
+                var txt = E2E.exportBackup();
+                document.getElementById('key-backup-text').value = txt;
+                var n = E2E.listBackedUpRooms().length;
+                this.toast(n ? '已生成 ' + n + ' 个会话的备份' : '还没有密钥可备份');
+            } catch (e) {
+                this.toast('生成失败：' + e.message, true);
+            }
+        },
+
+        async copyBackup() {
+            var ta = document.getElementById('key-backup-text');
+            if (!ta.value) return this.toast('请先点「生成备份」', true);
+            var self = this;
+            var done = function () { self.toast('已复制到剪贴板'); };
+            try {
+                await navigator.clipboard.writeText(ta.value);
+                done();
+            } catch (e) {
+                // 非 HTTPS 或权限被拒时的兜底
+                ta.removeAttribute('readonly');
+                ta.select();
+                try { document.execCommand('copy'); done(); }
+                catch (e2) { self.toast('复制失败，请手动全选复制', true); }
+                ta.setAttribute('readonly', '');
+            }
+        },
+
+        downloadBackup() {
+            var ta = document.getElementById('key-backup-text');
+            if (!ta.value) return this.toast('请先点「生成备份」', true);
+            var blob = new Blob([ta.value], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'facehub-keys-' + new Date().toISOString().slice(0, 10) + '.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            this.toast('已下载');
+        },
+
+        doImportBackup() {
+            var E2E = global.E2E;
+            var txt = document.getElementById('key-import-text').value.trim();
+            if (!txt) return this.toast('请先粘贴备份内容', true);
+            var overwrite = document.getElementById('key-overwrite').checked;
+            var r = E2E.importBackup(txt, overwrite);
+            if (r.error) return this.toast(r.error, true);
+
+            var msg = '已导入 ' + r.imported + ' 个密钥';
+            if (r.skipped) msg += '，跳过 ' + r.skipped + ' 个（本机已有，勾选覆盖可替换）';
+            this.toast(msg);
+            document.getElementById('key-import-text').value = '';
+            // 重新加载会话，让解密生效
+            if (r.imported && this.view === 'chats') this.loadChats();
         },
 
         setBadge(n) {
