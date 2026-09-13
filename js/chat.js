@@ -196,10 +196,45 @@
             });
         },
 
-        async accept(id) {
-            var ok = await API.acceptInvitation(id);
+        /**
+         * 接受邀请
+         *
+         * ⚠️ 实测发现的坑：仓库被删除重建后，**旧邀请会残留**。
+         * 接受旧邀请返回 204（看起来成功），但权限并不生效 ——
+         * 用户点了"接受"，会话却依然打不开。
+         *
+         * 所以接受后必须**验证真的能访问**，不行就继续尝试下一条邀请。
+         */
+        async accept(id, roomName) {
+            await API.acceptInvitation(id);
             API._ls('fh:rooms:etag', null);
-            return ok;
+
+            if (!roomName) return { ok: true, verified: false };
+
+            // 同一仓库可能有多条邀请（重建导致），逐条尝试直到真的能访问
+            try {
+                var invs = await this.invitations();
+                var same = invs.filter(function (i) { return i.name === roomName; });
+
+                // 先试本次传进来的，再试其余的
+                var order = [id].concat(
+                    same.map(function (i) { return i.id; }).filter(function (x) { return x !== id; })
+                );
+
+                for (var k = 0; k < order.length; k++) {
+                    if (k > 0) await API.acceptInvitation(order[k]);
+                    var repo = await API.getRepo(
+                        same.length ? same[0].owner : Store.me.login, roomName
+                    );
+                    if (repo) {
+                        API._ls('fh:rooms:etag', null);
+                        return { ok: true, verified: true, tried: k + 1 };
+                    }
+                }
+                return { ok: true, verified: false, tried: order.length };
+            } catch (e) {
+                return { ok: true, verified: false, error: e.message };
+            }
         },
 
         async decline(id) {
@@ -210,15 +245,27 @@
         // ── 消息 ───────────────────────────────────────────────
 
         /**
-         * 读消息
+         * 读消息（自动解密）
+         *
+         * 解密需要"我的私钥 + 对方公钥"。任一缺失就原样显示，
+         * 并标记 locked —— 界面上要让用户知道这条没能解密。
+         *
          * @param {boolean} fresh - 刚发完消息时用 true，绕过本地缓存
          */
-        async messages(owner, repo, fresh) {
+        async messages(owner, repo, fresh, opts) {
+            opts = opts || {};
             var ck = 'fh:msg:' + owner + '/' + repo;
             if (!fresh) {
                 var cached = API._ls(ck);
                 if (cached) {
-                    try { return JSON.parse(cached); } catch (e) { /* 坏了重新拉 */ }
+                    try {
+                        var cm = JSON.parse(cached);
+                        // 缓存也要解密状态正确；有密钥就重新解一遍
+                        if (opts.peerPub) {
+                            return await this._decryptAll(cm, owner, repo, opts);
+                        }
+                        return cm;
+                    } catch (e) { /* 坏了重新拉 */ }
                 }
             }
             var list = await API.messages(owner, repo, 1);
@@ -227,21 +274,127 @@
                     id: c.id,
                     from: c.user.login,
                     avatar: c.user.avatar_url,
-                    text: c.body,
+                    text: c.body,       // 可能是密文，稍后解
+                    raw: c.body,
                     ts: new Date(c.created_at).getTime()
                 };
             });
-            API._ls(ck, JSON.stringify(msgs));
-            return msgs;
+
+            var dec = await this._decryptAll(msgs, owner, repo, opts);
+            API._ls(ck, JSON.stringify(dec));
+            return dec;
         },
 
-        async send(owner, repo, text) {
+        /** 批量解密（内部用） */
+        async _decryptAll(msgs, owner, repo, opts) {
+            var E2E = global.E2E;
+            // 没有对方公钥 → 保持原样，不尝试解密
+            if (!E2E || !opts || !opts.peerPub) {
+                return msgs.map(function (m) {
+                    var isCipher = typeof m.raw === 'string' && m.raw.indexOf('E2E1.') === 0;
+                    return Object.assign({}, m, {
+                        text: isCipher ? '🔒 加密消息（等待密钥交换）' : (m.raw || m.text),
+                        locked: isCipher
+                    });
+                });
+            }
+            var aes = null;
+            try {
+                aes = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
+            } catch (e) {
+                aes = null;
+            }
+            var out = [];
+            for (var i = 0; i < msgs.length; i++) {
+                var m = msgs[i];
+                var r = await E2E.decrypt(aes, m.raw != null ? m.raw : m.text);
+                out.push(Object.assign({}, m, {
+                    text: r.text,
+                    locked: !!r.locked,
+                    encrypted: !r.plain && !r.locked
+                }));
+            }
+            return out;
+        },
+
+        /**
+         * 发消息（自动加密）
+         *
+         * 对方已发布公钥 → 加密后发送，GitHub 只看到密文
+         * 对方还没发布 → 明文发送（首次会话必然如此，等对方上线交换密钥）
+         */
+        async send(owner, repo, text, opts) {
             text = String(text || '').trim();
             if (!text) throw new Error('消息不能为空');
-            var r = await API.sendMessage(owner, repo, text, 1);
+            opts = opts || {};
+
+            var body = text;
+            var wasEncrypted = false;
+
+            var E2E = global.E2E;
+            if (E2E && opts.peerPub) {
+                try {
+                    var aes = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
+                    body = await E2E.encrypt(aes, text);
+                    wasEncrypted = true;
+                } catch (e) {
+                    // 加密失败就退回明文，不能让消息发不出去
+                    body = text;
+                }
+            }
+
+            var r = await API.sendMessage(owner, repo, body, 1);
             API._ls('fh:msg:' + owner + '/' + repo, null);
             API._ls('fh:rooms:etag', null);
+            r.__encrypted = wasEncrypted;
             return r;
+        },
+
+        // ── 密钥交换 ─────────────────────────────────────────
+
+        /**
+         * 建立/恢复加密会话
+         *
+         * 返回状态，界面据此显示"🔒 端到端加密"或"等待对方上线"
+         */
+        async setupE2E(owner, repo, myLogin, peerLogin, branch) {
+            var E2E = global.E2E;
+            if (!E2E) return { ready: false, reason: 'no-crypto' };
+            if (!global.crypto || !global.crypto.subtle) {
+                // 非 HTTPS 或老浏览器没有 Web Crypto
+                return { ready: false, reason: 'no-webcrypto' };
+            }
+
+            var state = {
+                ready: false,
+                myPub: null,
+                peerPub: null,
+                peerReady: false
+            };
+
+            // ① 确保我有密钥对，并把公钥发布到仓库
+            try {
+                await E2E.ensureKeyPair(myLogin, repo);
+                state.myPub = await E2E.publishPubKey(owner, repo, myLogin, branch);
+            } catch (e) {
+                // 写公钥失败（比如权限刚生效）不致命，下次重试
+                state.publishError = e.message;
+            }
+
+            // ② 读对方公钥
+            state.peerPub = await E2E.readPeerPubKey(owner, repo, peerLogin, branch);
+            state.peerReady = !!state.peerPub;
+
+            // ③ 双方公钥都在 → 可以派生共享密钥
+            if (state.myPub && state.peerPub) {
+                try {
+                    await E2E.deriveAesKey(myLogin, repo, state.peerPub);
+                    state.ready = true;
+                } catch (e) {
+                    state.error = e.message;
+                }
+            }
+            return state;
         }
     };
 
