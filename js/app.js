@@ -299,11 +299,19 @@
                 '写成自己仓库的一个文件：1 次请求，立即可见。</p>' +
                 '<h3 style="margin:20px 0 10px;font-size:17px">配额优化</h3>' +
                 '<ul class="principles" style="font-size:14.5px">' +
-                '<li>读内容走 <code>raw.githubusercontent.com</code>，是 CDN 不是 API，<b>零配额</b></li>' +
-                '<li>列目录带 ETag，没更新返回 304，<b>也零配额</b></li>' +
+                '<li>内容存本地缓存，二次打开 <b>零请求</b></li>' +
+                '<li>读取带 If-None-Match，没变化返回 304，<b>不计费</b></li>' +
+                '<li>列目录同样走 ETag，没有新帖也不计费</li>' +
                 '<li>不维护索引文件，用递归 tree 代替，省掉一半写请求</li>' +
                 '<li>每人只取最新 5 帖，请求数只与关注人数有关，与总帖数无关</li>' +
-                '</ul></div>';
+                '</ul>' +
+                '<h3 style="margin:20px 0 10px;font-size:17px">为什么不用 raw CDN</h3>' +
+                '<p style="font-size:15px;color:var(--fb-secondary);line-height:1.5">' +
+                '最初设计是"读内容走 raw.githubusercontent.com，完全不占配额"。' +
+                '实测发现 raw 对新仓库有严重冷启动延迟 —— 首次访问要数十秒，' +
+                '初始化一次跑了 75 秒。改成走 API + 条件请求后，' +
+                '首次约 500ms、二次 304 同样不计费，初始化降到 1.1 秒。</p>' +
+                '</div>';
         },
 
         // ── 发帖 ───────────────────────────────────────────────
