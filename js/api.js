@@ -284,6 +284,81 @@
         async rate() {
             var r = await this.req('/rate_limit');
             return r.data.resources;
+        },
+
+        // ── 私聊相关 ───────────────────────────────────────────────
+
+        /**
+         * 建私有仓库（私聊会话用）
+         * 已存在会 422，调用方据此判断"对方先建了"
+         */
+        async createPrivateRepo(name, description) {
+            var r = await this.req('/user/repos', {
+                method: 'POST',
+                body: { name: name, description: description, private: true, auto_init: false }
+            });
+            return r.data;
+        },
+
+        /** 建 issue（空仓库也能建，实测通过 —— 不需要先有文件） */
+        async createIssue(owner, repo, title, body) {
+            var r = await this.req('/repos/' + owner + '/' + repo + '/issues', {
+                method: 'POST',
+                body: { title: title, body: body || '' }
+            });
+            return r.data;
+        },
+
+        /**
+         * 邀请协作者 —— 私聊的关键
+         * 很多人以为必须去邮件点链接，其实有专门的接受端点（见 acceptInvitation）
+         */
+        async inviteCollaborator(owner, repo, username) {
+            var r = await this.req(
+                '/repos/' + owner + '/' + repo + '/collaborators/' + encodeURIComponent(username),
+                { method: 'PUT', body: { permission: 'push' } }
+            );
+            return r.data;
+        },
+
+        /** 我收到的仓库邀请（待接受） */
+        async invitations() {
+            var r = await this.req('/user/repository_invitations');
+            return r.data || [];
+        },
+
+        /** 在应用内直接接受邀请，不用去邮箱点链接 */
+        async acceptInvitation(id) {
+            await this.req('/user/repository_invitations/' + id, { method: 'PATCH' });
+            return true;
+        },
+
+        async declineInvitation(id) {
+            await this.req('/user/repository_invitations/' + id, { method: 'DELETE' });
+            return true;
+        },
+
+        /**
+         * 消息列表 —— 用 issue 评论存消息
+         *
+         * 为什么不用文件：追加文件要先读 sha 再写，两人同时发必然 409 冲突。
+         * issue 评论天然支持并发追加，还自带作者、头像、时间戳。
+         */
+        async messages(owner, repo, issueNumber, since) {
+            var q = '/repos/' + owner + '/' + repo + '/issues/' +
+                (issueNumber || 1) + '/comments?per_page=100';
+            if (since) q += '&since=' + encodeURIComponent(since);
+            var r = await this.req(q);
+            return r.data || [];
+        },
+
+        /** 发消息 */
+        async sendMessage(owner, repo, text, issueNumber) {
+            var r = await this.req(
+                '/repos/' + owner + '/' + repo + '/issues/' + (issueNumber || 1) + '/comments',
+                { method: 'POST', body: { body: text } }
+            );
+            return r.data;
         }
     };
 
