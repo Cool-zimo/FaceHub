@@ -378,6 +378,45 @@
             this.updateQuota();
         },
 
+        /** 「核对安全码」按钮 */
+        bindVerify(room, e2e) {
+            var self = this;
+            var btn = document.getElementById('verify-btn');
+            if (!btn) return;
+            btn.onclick = function () {
+                if (!global.confirm(
+                    '你和 ' + room.peer + ' 屏幕上的安全码一致吗？\n\n' +
+                    '   ' + (e2e.safetyNumber || '') + '\n\n' +
+                    '只有当另一个人当面/电话告诉你同样的号码时，才点「确定」。\n' +
+                    '不一致 = 可能有人在中间窃听，不要点确定。'
+                )) return;
+                global.E2E.markVerified(Store.me.login, room.name, e2e.peerPub);
+                e2e.verified = true;
+                self.renderE2EStatus(e2e, room);
+                self.toast('已标记为核对通过');
+            };
+        },
+
+        /** 公钥变更后的「重新核对」 */
+        bindReverify(room, e2e) {
+            var self = this;
+            var btn = document.getElementById('reverify-btn');
+            if (!btn) return;
+            btn.onclick = function () {
+                if (!global.confirm(
+                    '对方密钥已变更。\n\n' +
+                    '如果你知道 ' + room.peer + ' 刚换了设备/清了缓存，' +
+                    '可以重新核对新密钥：\n\n   ' + (e2e.safetyNumber || '') + '\n\n' +
+                    '确认无误后点「确定」。'
+                )) return;
+                global.E2E.markVerified(Store.me.login, room.name, e2e.peerPub);
+                e2e.verified = true;
+                e2e.pubKeyChanged = false;
+                self.renderE2EStatus(e2e, room);
+                self.toast('已重新核对');
+            };
+        },
+
         /** 顶部的加密状态条 */
         renderE2EStatus(e2e, room) {
             var bar = document.getElementById('e2e-bar');
@@ -388,10 +427,32 @@
                 var input = document.getElementById('chat-input-box');
                 input.parentNode.insertBefore(bar, input);
             }
-            if (e2e && e2e.ready) {
+            if (e2e && e2e.pubKeyChanged) {
+                // 已核对过的会话，公钥却变了 —— 最高优先级警告
+                bar.className = 'e2e-bar danger';
+                bar.innerHTML = '🚨 <b>安全警告：对方的密钥被更换了</b> · ' +
+                    '如果你确认 ' + this.esc(room.peer) + ' 没有换设备，' +
+                    '可能有人正在中间窃听。' +
+                    '<button id="reverify-btn" class="e2e-btn">重新核对</button>';
+                this.bindReverify(room, e2e);
+            } else if (e2e && e2e.ready) {
                 bar.className = 'e2e-bar ok';
-                bar.innerHTML = '🔒 <b>端到端加密已启用</b> · ' +
-                    'GitHub 只能看到密文，密钥只在你和 ' + this.esc(room.peer) + ' 的浏览器里';
+                var sn = e2e.safetyNumber ? '<code class="safety-num">' + e2e.safetyNumber + '</code>' : '';
+                if (e2e.verified) {
+                    bar.innerHTML = '🔒 <b>端到端加密 · 已核对</b> ' + sn +
+                        ' · GitHub 只能看到密文';
+                } else {
+                    bar.innerHTML = '🔒 <b>端到端加密已启用</b> ' + sn +
+                        '<button id="verify-btn" class="e2e-btn">核对安全码</button>' +
+                        '<div class="e2e-tip">和 ' + this.esc(room.peer) +
+                        ' 线下（见面/电话）比对这串码是否一致。一致才算真的没有中间人。</div>';
+                    this.bindVerify(room, e2e);
+                }
+            } else if (e2e && e2e.peerPubVanished) {
+                bar.className = 'e2e-bar danger';
+                bar.innerHTML = '🚨 <b>安全警告：对方的密钥消失了</b> · ' +
+                    '之前有，现在没了。可能是被删除以强制明文发送。' +
+                    '本会话将<b>明文</b>发送，请注意。';
             } else if (e2e && e2e.peerReady === false) {
                 bar.className = 'e2e-bar warn';
                 bar.innerHTML = '🔑 <b>等待对方上线交换密钥</b> · ' +
