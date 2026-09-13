@@ -385,11 +385,28 @@
             state.peerPub = await E2E.readPeerPubKey(owner, repo, peerLogin, branch);
             state.peerReady = !!state.peerPub;
 
+            // ②-b 公钥是否曾被换过（MITM 检测）
+            // 之前核对过安全码，但对方公钥变了 → 高度可疑
+            var chk = E2E.checkPubKeyChange(myLogin, repo, state.peerPub);
+            state.verified = chk.verified;
+            state.pubKeyChanged = chk.changed;
+
+            // ②-c 降级检测：曾经有公钥，现在没了 → 可能是被删了强制明文
+            if (!state.peerPub) {
+                var hadBefore = API._ls('fh:hadpub:' + myLogin + '/' + repo);
+                state.peerPubVanished = !!hadBefore;
+            } else {
+                API._ls('fh:hadpub:' + myLogin + '/' + repo, '1');
+            }
+
             // ③ 双方公钥都在 → 可以派生共享密钥
             if (state.myPub && state.peerPub) {
                 try {
                     await E2E.deriveAesKey(myLogin, repo, state.peerPub);
                     state.ready = true;
+
+                    // 安全码（供线下核对，防 MITM）
+                    state.safetyNumber = await E2E.safetyNumber(repo, state.myPub, state.peerPub);
                 } catch (e) {
                     state.error = e.message;
                 }
