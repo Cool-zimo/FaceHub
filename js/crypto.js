@@ -147,6 +147,11 @@
          * @returns {string} 形如 "E2E1.<iv_b64>.<cipher_b64>"
          */
         async encrypt(aesKey, text) {
+            // 没有密钥就明确报错，让调用方走明文回退。
+            // 不能静默传 null 给 subtle.encrypt —— 那会抛 TypeError，
+            // 若不慎被吞掉，用户会以为消息加密了其实没有。
+            if (!aesKey) throw new Error('没有可用的加密密钥');
+
             var iv = global.crypto.getRandomValues(new Uint8Array(12));
             var cipher = await global.crypto.subtle.encrypt(
                 { name: 'AES-GCM', iv: iv },
@@ -211,12 +216,90 @@
         async readPeerPubKey(owner, repo, peerLogin, branch) {
             var path = 'pk/' + peerLogin + '.json';
             try {
-                var txt = await API.readFile(owner, repo, path, branch);
+                // fresh=true：公钥是安全关键数据，绝不能读缓存。
+                // 否则攻击者换掉公钥后，用户可能因为缓存一直看到旧的，
+                // 换设备后才突然拿到假的 —— 检测时机被推迟，风险更高。
+                var txt = await API.readFile(owner, repo, path, branch, true);
                 var d = JSON.parse(txt);
                 return d.pub || null;
             } catch (e) {
                 return null;
             }
+        },
+
+        // ── 安全码（防 MITM）──────────────────────────────────
+
+        /**
+         * 计算安全码（Safety Number）
+         *
+         * 为什么必须有这个：
+         *   公钥存在共享仓库里，能写仓库的人（GitHub 官方、仓库主、
+         *   任何 collaborator）都能偷偷替换它 —— 这就是 MITM。
+         *   实测已验证：替换公钥后攻击者可解密双方全部消息。
+         *
+         *   防御手段只有一个：让双方能**线下核对**公钥是否被换过。
+         *   把两个公钥一起哈希成一段短码，双方算出的应当**完全一致**。
+         *   不一致 = 有人在中间。
+         *
+         * 关键点：两个公钥必须**排序后**再拼接，
+         * 否则 A 算（我,你）和 B 算（你,我）会得到不同结果。
+         *
+         * @returns {string} 形如 "A3F9 2C81 7B04 5E6D"
+         */
+        async safetyNumber(room, myPub, peerPub) {
+            // room 也必须校验：否则不同房间可能算出同一个安全码，
+            // 攻击者就能拿 A 会话的码骗过 B 会话的核对。
+            if (!room || !myPub || !peerPub) return null;
+
+            // 排序保证双方算出同一个值
+            var sorted = [myPub, peerPub].sort().join('|');
+            var input = 'facehub-safety:' + room + ':' + sorted;
+
+            var digest = await global.crypto.subtle.digest(
+                'SHA-256',
+                new TextEncoder().encode(input)
+            );
+
+            var bytes = new Uint8Array(digest).slice(0, 8);
+            var hex = '';
+            for (var i = 0; i < bytes.length; i++) {
+                hex += bytes[i].toString(16).padStart(2, '0');
+            }
+            // 每 4 位一组，便于口头核对
+            return hex.toUpperCase().match(/.{1,4}/g).join(' ');
+        },
+
+        /**
+         * 公钥是否被换过
+         *
+         * 已验证过的会话，如果对方公钥变了 —— 要么是对方换了设备，
+         * 要么是被 MITM 了。两者都必须明确警告，不能静默接受。
+         */
+        checkPubKeyChange(login, room, currentPeerPub) {
+            var key = 'fh:verified:' + login + '/' + room;
+            var raw = API._ls(key);
+            if (!raw) return { verified: false, changed: false };
+
+            var saved;
+            try { saved = JSON.parse(raw); } catch (e) { return { verified: false, changed: false }; }
+
+            var changed = saved.pub && currentPeerPub && saved.pub !== currentPeerPub;
+            return {
+                verified: true,
+                changed: changed,
+                savedAt: saved.at,
+                previousPub: saved.pub
+            };
+        },
+
+        /** 标记为已核对（线下比对过安全码后调用） */
+        markVerified(login, room, peerPub) {
+            API._ls('fh:verified:' + login + '/' + room,
+                JSON.stringify({ pub: peerPub, at: Date.now() }));
+        },
+
+        clearVerified(login, room) {
+            API._ls('fh:verified:' + login + '/' + room, null);
         },
 
         // ── Base64 工具 ───────────────────────────────────────
