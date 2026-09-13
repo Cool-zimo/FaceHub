@@ -156,6 +156,10 @@
         </div>
 
         <div id="room-list" class="room-list"></div>
+
+        <div class="chat-list-foot">
+          <button id="key-backup-btn" class="btn-soft btn-sm btn-block">🔑 密钥备份</button>
+        </div>
       </div>
 
       <!-- 右：消息区 -->
@@ -180,6 +184,55 @@
         </div>
       </div>
     </section>
+
+    <!-- 密钥备份对话框 -->
+    <div id="key-modal" class="modal" style="display:none">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3>🔑 密钥备份</h3>
+          <button id="key-modal-close" class="modal-x">×</button>
+        </div>
+
+        <div class="modal-body">
+          <p class="key-note">
+            私钥只存在这台设备的浏览器里。<b>换设备或清缓存，历史消息就解不开了。</b>
+            下面这段文本可以恢复你的密钥 —— 但它是<b>明文私钥</b>，
+            谁拿到谁就能解密你的私聊，请自己妥善保存。
+          </p>
+
+          <div class="key-tabs">
+            <button class="key-tab active" data-tab="export">导出</button>
+            <button class="key-tab" data-tab="import">导入</button>
+          </div>
+
+          <div id="key-export-pane">
+            <div id="key-count" class="key-count"></div>
+            <textarea id="key-backup-text" class="key-text" readonly
+                      placeholder="点「生成备份」"></textarea>
+            <div class="key-actions">
+              <button id="key-gen-btn" class="btn-primary btn-sm">生成备份</button>
+              <button id="key-copy-btn" class="btn-soft btn-sm">复制</button>
+              <button id="key-download-btn" class="btn-soft btn-sm">下载文件</button>
+            </div>
+          </div>
+
+          <div id="key-import-pane" style="display:none">
+            <textarea id="key-import-text" class="key-text"
+                      placeholder="把之前备份的内容粘贴到这里"></textarea>
+            <label class="key-check">
+              <input type="checkbox" id="key-overwrite">
+              覆盖本机已有的同名密钥（用于设备迁移或密钥损坏）
+            </label>
+            <div class="key-actions">
+              <button id="key-import-btn" class="btn-primary btn-sm">导入</button>
+              <label class="btn-soft btn-sm key-file-label">
+                选择文件<input type="file" id="key-file" accept=".json,.txt" hidden>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- 右栏 -->
     <aside class="col-right">
