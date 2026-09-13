@@ -276,17 +276,26 @@
             acc.textContent = '接受';
             acc.onclick = async function () {
                 acc.disabled = true;
+                acc.textContent = '接受中…';
                 try {
-                    await Chat.accept(inv.id);
-                    self.toast('已接受 ' + inv.peer + ' 的私聊');
-                    await self.loadChats();
-                    // 接受后直接打开这个会话
-                    var rooms = await Chat.listRooms();
-                    var hit = rooms.filter(function (r) { return r.name === inv.name; })[0];
-                    if (hit) self.openRoom(hit);
+                    var res = await Chat.accept(inv.id, inv.name);
+                    if (res.verified) {
+                        self.toast('已接受 ' + inv.peer + ' 的私聊' +
+                            (res.tried > 1 ? '（尝试了 ' + res.tried + ' 条邀请才生效）' : ''));
+                        await self.loadChats();
+                        var rooms = await Chat.listRooms();
+                        var hit = rooms.filter(function (r) { return r.name === inv.name; })[0];
+                        if (hit) self.openRoom(hit);
+                    } else {
+                        // 接受返回成功但实际没生效 —— 幽灵邀请
+                        self.toast('邀请已失效（仓库可能被删除重建过）。' +
+                            '请让 ' + inv.peer + ' 重新发起会话。', true);
+                        await self.loadChats();
+                    }
                 } catch (e) {
                     self.toast('接受失败：' + e.message, true);
                     acc.disabled = false;
+                    acc.textContent = '接受';
                 }
             };
 
@@ -323,6 +332,7 @@
 
         async openRoom(room) {
             this.currentRoom = room;
+            this.e2eState = null;
             document.querySelectorAll('.room-row').forEach(function (r) {
                 r.classList.toggle('active', r.querySelector('.nm').textContent === room.peer);
             });
@@ -338,16 +348,61 @@
             document.getElementById('chat-input-box').style.display = '';
 
             var box = document.getElementById('chat-messages');
-            box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center">载入中…</div>';
+            box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center">正在建立加密…</div>';
 
+            // ① 先做密钥交换（发布我的公钥 + 读对方公钥）
+            var e2e = null;
             try {
-                var msgs = await Chat.messages(room.owner, room.name);
+                e2e = await Chat.setupE2E(
+                    room.owner, room.name,
+                    Store.me.login, room.peer, Store.branch
+                );
+                this.e2eState = e2e;
+                this.renderE2EStatus(e2e, room);
+            } catch (e) {
+                this.e2eState = { ready: false, reason: e.message };
+            }
+
+            // ② 再读消息（带上解密所需的对方公钥）
+            try {
+                var self = this;
+                var msgs = await Chat.messages(room.owner, room.name, true, {
+                    myLogin: Store.me.login,
+                    peerPub: e2e && e2e.peerPub
+                });
                 this.renderMessages(msgs);
             } catch (e) {
                 box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;color:#cf222e">' +
                     '载入失败：' + this.esc(e.message) + '</div>';
             }
             this.updateQuota();
+        },
+
+        /** 顶部的加密状态条 */
+        renderE2EStatus(e2e, room) {
+            var bar = document.getElementById('e2e-bar');
+            if (!bar) {
+                bar = document.createElement('div');
+                bar.id = 'e2e-bar';
+                bar.className = 'e2e-bar';
+                var input = document.getElementById('chat-input-box');
+                input.parentNode.insertBefore(bar, input);
+            }
+            if (e2e && e2e.ready) {
+                bar.className = 'e2e-bar ok';
+                bar.innerHTML = '🔒 <b>端到端加密已启用</b> · ' +
+                    'GitHub 只能看到密文，密钥只在你和 ' + this.esc(room.peer) + ' 的浏览器里';
+            } else if (e2e && e2e.peerReady === false) {
+                bar.className = 'e2e-bar warn';
+                bar.innerHTML = '🔑 <b>等待对方上线交换密钥</b> · ' +
+                    '你已发布公钥。' + this.esc(room.peer) + ' 打开一次会话后即可加密。' +
+                    '当前消息将<b>明文</b>发送。';
+            } else {
+                bar.className = 'e2e-bar warn';
+                bar.innerHTML = '⚠️ <b>加密不可用</b> · ' +
+                    this.esc((e2e && (e2e.reason || e2e.error)) || '未知原因') +
+                    '。消息将明文发送。';
+            }
         },
 
         renderMessages(msgs) {
@@ -371,8 +426,11 @@
                 row.appendChild(img);
 
                 var b = document.createElement('div');
-                b.className = 'bubble';
+                b.className = 'bubble' +
+                    (m.encrypted ? ' encrypted' : '') +
+                    (m.locked ? ' locked' : '');
                 b.textContent = m.text;
+                if (m.encrypted) b.title = '端到端加密 · GitHub 只存了密文';
                 row.appendChild(b);
                 box.appendChild(row);
 
@@ -416,8 +474,18 @@
             btn.disabled = true;
             input.value = '';
             try {
-                await Chat.send(room.owner, room.name, text);
-                var msgs = await Chat.messages(room.owner, room.name, true);
+                var e2e = this.e2eState || {};
+                var r = await Chat.send(room.owner, room.name, text, {
+                    myLogin: Store.me.login,
+                    peerPub: e2e.peerPub
+                });
+                if (r && r.__encrypted === false && e2e.peerReady === false) {
+                    this.toast('⚠️ 对方还没上线，本条明文发送');
+                }
+                var msgs = await Chat.messages(room.owner, room.name, true, {
+                    myLogin: Store.me.login,
+                    peerPub: e2e.peerPub
+                });
                 this.renderMessages(msgs);
                 await this.loadChats();
             } catch (e) {
