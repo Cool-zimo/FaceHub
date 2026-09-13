@@ -157,29 +157,36 @@
          */
         async readFile(owner, repo, path, branch, fresh) {
             branch = branch || 'main';
-            var self = this;
+            var ck = 'fh:c:' + owner + '/' + repo + '/' + path;   // 内容缓存
+            var ek = 'fh:e:' + owner + '/' + repo + '/' + path;   // ETag
 
-            if (!fresh) {
-                var url = 'https://raw.githubusercontent.com/' +
-                    owner + '/' + repo + '/' + branch + '/' +
-                    path.split('/').map(encodeURIComponent).join('/');
-                try {
-                    var resp = await fetch(url);
-                    if (resp.ok) {
-                        self.stats.free++;
-                        if (global.API && global.API.onStats) global.API.onStats(self.stats);
-                        return await resp.text();
-                    }
-                    // raw 拿不到（缓存未生效/文件不存在）→ 回落到 API
-                } catch (e) { /* 网络问题，回落 */ }
-            }
+            var cached = this._ls(ck);
+            var etag = this._ls(ek);
+
+            // 内容已在本地且不是刚写完 → 0 请求
+            if (cached !== null && cached !== undefined && !fresh) return cached;
+
+            var headers = {};
+            if (etag && !fresh) headers['If-None-Match'] = etag;
 
             var r = await this.req(
                 '/repos/' + owner + '/' + repo + '/contents/' +
                 path.split('/').map(encodeURIComponent).join('/') +
-                '?ref=' + encodeURIComponent(branch)
+                '?ref=' + encodeURIComponent(branch),
+                { headers: headers }
             );
-            return this._decodeContent(r.data);
+
+            // 304：内容没变，用本地缓存。req() 已计为 free
+            if (r.__status === 304) {
+                if (cached !== null && cached !== undefined) return cached;
+                throw new Error('服务器返回 304 但本地没有缓存');
+            }
+
+            var text = this._decodeContent(r.data);
+            var newEtag = r.__headers.get('etag');
+            if (newEtag) this._ls(ek, newEtag);
+            this._ls(ck, text);
+            return text;
         },
 
         /** contents API 返回 base64，需按 UTF-8 解码（中文安全） */
