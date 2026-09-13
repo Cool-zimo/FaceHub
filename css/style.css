@@ -496,3 +496,25 @@ code {
     grid-template-columns: minmax(0, 1200px);
     justify-content: center;
 }
+
+/* ═══ E2E 加密状态条 ═══════════════════════════════ */
+.e2e-bar {
+    padding: 9px 16px; font-size: 12.5px; line-height: 1.5;
+    border-top: 1px solid var(--fb-border);
+}
+.e2e-bar.ok {
+    background: #e7f8ed; color: #0a6b3d;
+}
+.e2e-bar.warn {
+    background: #fff8e1; color: #78350f;
+}
+.e2e-bar b { font-weight: 600; }
+
+/* 加密气泡加个锁标记 */
+.bubble.encrypted::after {
+    content: '🔒';
+    font-size: 10px; margin-left: 5px; opacity: .55;
+}
+.bubble.locked {
+    background: #fff3cd; color: #78350f; font-style: italic;
+}
