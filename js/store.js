@@ -59,12 +59,29 @@
             }
             this.branch = repo.default_branch || 'main';
 
-            // profile 和 following 可以并发读（各 1 次请求）
-            var self = this;
-            var p = this.loadProfile(me.login).catch(function () { return null; });
-            var f = this.loadFollowing(me.login).catch(function () { return []; });
-            this.profile = await p;
-            this.following = await f;
+            // 关键：用**一次** tree 拿到文件清单，再决定读哪些。
+            // 如果直接读 profile.json / following.json，新用户这两个文件都不存在，
+            // 会各吃一次 404 —— 而 404 也要等网络往返，初始化会慢到几十秒。
+            var files = [];
+            try {
+                var t = await API.tree(me.login, this.homeRepo, this.branch);
+                files = t.files;
+            } catch (e) {
+                // 空仓库 tree 会 404/409，此时文件清单就是空的
+                files = [];
+            }
+            this._files = files;
+
+            var jobs = [];
+            jobs.push(files.indexOf('profile.json') >= 0
+                ? this.loadProfile(me.login).catch(function () { return null; })
+                : null);
+            jobs.push(files.indexOf('following.json') >= 0
+                ? this.loadFollowing(me.login).catch(function () { return []; })
+                : []);
+
+            this.profile = await jobs[0];
+            this.following = await jobs[1];
 
             // 首次使用：写一份默认 profile
             if (!this.profile) {
