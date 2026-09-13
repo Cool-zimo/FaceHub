@@ -227,6 +227,75 @@
             }
         },
 
+        // ── 密钥备份 ─────────────────────────────────────────
+
+        /**
+         * 导出全部私钥备份
+         *
+         * 为什么必须做：私钥只存在 localStorage，换浏览器/清缓存就没了，
+         * 历史消息会全部变成「无法解密」。这是纯前端 E2E 最现实的代价。
+         *
+         * 备份内容**不加密**（用一段口令加密会引入"忘了口令更惨"的新问题），
+         * 所以界面上必须明说：这是一份明文私钥，谁拿到谁就能解密。
+         */
+        exportBackup() {
+            var out = { v: 1, type: 'facehub-keys', rooms: {} };
+            var prefix = 'fh:sk:';
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (!k || k.indexOf(prefix) !== 0) continue;
+                try {
+                    var d = JSON.parse(localStorage.getItem(k));
+                    if (d && d.priv) out.rooms[k.slice(prefix.length)] = d;
+                } catch (e) { /* 跳过坏数据 */ }
+            }
+            out.exportedAt = new Date().toISOString();
+            return JSON.stringify(out, null, 2);
+        },
+
+        /**
+         * 导入备份
+         * @param {string} json
+         * @param {boolean} overwrite - 本地已有同名密钥时是否覆盖
+         * @returns {{imported:number, skipped:number, error:string|null}}
+         */
+        importBackup(json, overwrite) {
+            var data;
+            try { data = JSON.parse(json); } catch (e) {
+                return { imported: 0, skipped: 0, error: '不是有效的 JSON' };
+            }
+            if (!data || data.type !== 'facehub-keys' || !data.rooms) {
+                return { imported: 0, skipped: 0, error: '不是 FaceHub 密钥备份' };
+            }
+
+            var imported = 0, skipped = 0;
+            var prefix = 'fh:sk:';
+            for (var key in data.rooms) {
+                if (!Object.prototype.hasOwnProperty.call(data.rooms, key)) continue;
+                var d = data.rooms[key];
+                if (!d || !d.priv || !d.pub) { skipped++; continue; }
+
+                var lsKey = prefix + key;
+                var exists = !!localStorage.getItem(lsKey);
+                if (exists && !overwrite) { skipped++; continue; }
+
+                localStorage.setItem(lsKey, JSON.stringify(d));
+                imported++;
+            }
+            return { imported: imported, skipped: skipped, error: null };
+        },
+
+        /** 列出本地已有密钥的会话（供界面展示备份了哪些） */
+        listBackedUpRooms() {
+            var prefix = 'fh:sk:';
+            var out = [];
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (k && k.indexOf(prefix) === 0) out.push(k.slice(prefix.length));
+            }
+            return out;
+        },
+
         // ── 安全码（防 MITM）──────────────────────────────────
 
         /**
