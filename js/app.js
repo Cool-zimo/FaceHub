@@ -435,14 +435,18 @@
 
         /** 安全码：点一下才展开，避免常态化的核对提示造成噪音 */
         bindSafetyToggle() {
+            var self = this;
             var btn = document.getElementById('sn-toggle');
             var val = document.getElementById('sn-value');
-            if (!btn || !val) return;
-            btn.onclick = function () {
-                var show = val.style.display === 'none';
-                val.style.display = show ? '' : 'none';
-                btn.textContent = show ? '隐藏' : '安全码';
-            };
+            if (btn && val) {
+                btn.onclick = function () {
+                    var show = val.style.display === 'none';
+                    val.style.display = show ? '' : 'none';
+                    btn.textContent = show ? '隐藏' : '安全码';
+                };
+            }
+            var rb = document.getElementById('resync-btn');
+            if (rb) rb.onclick = function () { self.resyncKey(); };
         },
 
         /** 公钥变更后的「知道了」 */
@@ -485,7 +489,8 @@
                 var sn = e2e.safetyNumber
                     ? '<button id="sn-toggle" class="e2e-btn">安全码</button>' +
                       '<span id="sn-value" class="safety-num" style="display:none">' +
-                      e2e.safetyNumber + '</span>'
+                      e2e.safetyNumber + '</span>' +
+                      '<button id="resync-btn" class="e2e-btn" title="密钥不同步时用它">重新同步</button>'
                     : '';
                 if (e2e.verified) {
                     bar.innerHTML = '🔒 <b>端到端加密 · 已核对</b> ' + sn +
@@ -539,6 +544,17 @@
                 b.textContent = m.text;
                 if (m.encrypted) b.title = '端到端加密 · GitHub 只存了密文';
                 row.appendChild(b);
+
+                // 解不开的消息给个删除入口：密钥不同步时会产生一批
+                // 永远解不开的密文，堆在界面上很碍眼，得能清掉。
+                if (m.locked && m.id) {
+                    var del = document.createElement('button');
+                    del.className = 'bubble-del';
+                    del.textContent = '删除';
+                    del.title = '这条永远解不开，删掉它';
+                    del.onclick = function () { self.deleteMessage(room, m.id); };
+                    row.appendChild(del);
+                }
                 box.appendChild(row);
 
                 var meta = document.createElement('div');
@@ -547,6 +563,53 @@
                 box.appendChild(meta);
             });
             box.scrollTop = box.scrollHeight;
+        },
+
+        /**
+         * 删掉一条解不开的消息
+         *
+         * 只有评论作者本人或仓库管理员能删；没权限时给出明确提示，
+         * 而不是"删了但没反应"。
+         */
+        async deleteMessage(room, id) {
+            if (!global.confirm('删除这条无法解密的消息？此操作不可恢复。')) return;
+            try {
+                await API.deleteMessage(room.owner, room.name, id);
+                API._ls('fh:msg:' + room.owner + '/' + room.name, null);
+                this.toast('已删除');
+                var msgs = await Chat.messages(room.owner, room.name, true, {
+                    myLogin: Store.me.login,
+                    peerPub: this.e2eState && this.e2eState.peerPub
+                });
+                this.renderMessages(msgs);
+            } catch (e) {
+                this.toast('删除失败：' + e.message +
+                    (e.status === 403 ? '（只能删除自己发的消息）' : ''), true);
+            }
+        },
+
+        /**
+         * 重新同步密钥
+         *
+         * 会丢弃本地私钥重新生成。历史密文将永久无法解开 ——
+         * 所以必须二次确认，不能手滑点掉。
+         */
+        async resyncKey() {
+            var room = this.currentRoom;
+            if (!room) return;
+            if (!global.confirm(
+                '重新同步密钥？\n\n' +
+                '会重新生成你的密钥对。此后新消息可以正常加密，\n' +
+                '但**之前那些解不开的密文将永久无法恢复**。\n\n' +
+                '建议先让对方也同步一次。'
+            )) return;
+            try {
+                await Chat.resyncKey(room.owner, room.name, Store.me.login, Store.branch);
+                this.toast('已重新生成密钥，正在重新加载…');
+                await this.openRoom(room);
+            } catch (e) {
+                this.toast('同步失败：' + e.message, true);
+            }
         },
 
         async startChat() {
@@ -580,15 +643,21 @@
             var btn = document.getElementById('chat-send-btn');
             btn.disabled = true;
             input.value = '';
+            var self = this;
             try {
                 var e2e = this.e2eState || {};
                 var r = await Chat.send(room.owner, room.name, text, {
                     myLogin: Store.me.login,
                     peerPub: e2e.peerPub
                 });
-                if (r && r.__encrypted === false && e2e.peerReady === false) {
+
+                if (r && r.__encError) {
+                    // 明确告知：这条是明文，不是你以为的加密
+                    this.toast('⚠️ 加密失败，本条明文发送：' + r.__encError, true);
+                } else if (r && r.__encrypted === false && e2e.peerReady === false) {
                     this.toast('⚠️ 对方还没上线，本条明文发送');
                 }
+
                 var msgs = await Chat.messages(room.owner, room.name, true, {
                     myLogin: Store.me.login,
                     peerPub: e2e.peerPub
@@ -596,11 +665,16 @@
                 this.renderMessages(msgs);
                 await this.loadChats();
             } catch (e) {
-                this.toast('发送失败：' + e.message, true);
+                // 任何失败都必须让用户看见，不能静默
+                this.toast('发送失败：' + (e && e.message ? e.message : e), true);
                 input.value = text;
+                if (global.console) console.error('[sendChat]', e);
+            } finally {
+                // 放 finally：哪怕上面任何一步抛错，按钮也必须恢复，
+                // 否则按钮永久 disabled，之后再点就"完全没反应"了
+                btn.disabled = false;
+                try { this.updateQuota(); } catch (e2) { /* 配额显示失败无所谓 */ }
             }
-            btn.disabled = false;
-            this.updateQuota();
         },
 
         // ── 密钥备份 ─────────────────────────────────────────
