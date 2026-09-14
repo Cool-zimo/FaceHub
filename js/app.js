@@ -27,6 +27,34 @@
         e2eState: null,
         searchKw: '',
 
+        // ── 本地昵称 ───────────────────────────────────────────
+        //
+        // 昵称是**我怎么看对方**，跟群名不一样：
+        //   · 昵称 → 只有我自己看到，存 localStorage
+        //   · 群名 → 所有人共享，写进 group.json
+        //
+        // 这点必须分清，否则会把私人备注同步给别人（微信的"备注"和
+        // "群名称"也是两回事）。
+        nickKey: function (owner, repo) {
+            return 'fh:nick:' + owner + '/' + repo;
+        },
+        getNick: function (owner, repo) {
+            return this.ls(this.nickKey(owner, repo)) || '';
+        },
+        setNick: function (owner, repo, nick) {
+            var v = String(nick || '').trim();
+            this.ls(this.nickKey(owner, repo), v || null);
+        },
+
+        /** 会话显示名：昵称优先，否则群名 / 对方用户名 */
+        displayName: function (c) {
+            if (!c) return '';
+            var nick = this.getNick(c.owner, c.name);
+            if (nick) return nick;
+            if (c.type === 'group') return c.meta && c.meta.name ? c.meta.name : c.title;
+            return c.title;
+        },
+
         // ── 存储 ───────────────────────────────────────────────
         ls: function (k, v) {
             try {
@@ -144,8 +172,17 @@
             // 任何人随时能读到，随时能给我发加密消息。
             this.publishIdentity();
 
-            await this.loadConvs();
+            // ★ 轮询必须在 loadConvs 之前启动，且包在 finally 里。
+            // 之前放在最后：loadConvs 一旦抛异常，startPolling 就永远
+            // 执行不到 —— 表现为"对方发了消息，我这边刷新才看得到"。
             this.startPolling();
+
+            try {
+                await this.loadConvs();
+            } catch (e) {
+                if (global.console) console.error('[启动] 载入会话失败', e);
+                this.toast('载入会话列表失败：' + (e.message || e), true);
+            }
         },
 
         /**
@@ -302,17 +339,20 @@
             });
         },
 
+        /**
+         * 切换底部/侧边 Tab
+         *
+         * 通讯录不是"新建会话"按钮的别名 —— 微信里它是人列表。
+         * 这里渲染所有单聊对象（即通讯录里的人），
+         * 待接受的邀请放在「新的朋友」那一块。
+         */
         switchTab(tab) {
             if (tab === 'me') {
                 this.openKeyModal();
                 return;
             }
-            if (tab === 'contacts') {
-                this.openNew();
-                return;
-            }
-            this.view = 'chats';
-            this.loadConvs();
+            this.view = (tab === 'contacts') ? 'contacts' : 'chats';
+            this.renderConvs();
         },
 
         // ── 会话列表 ───────────────────────────────────────────
@@ -326,6 +366,8 @@
             try {
                 var rooms = await Chat.listRooms();
                 rooms.forEach(function (r) {
+                    // 已解除绑定的不再出现
+                    if (this.ls('fh:hidden:' + r.owner + '/' + r.name)) return;
                     convs.push({
                         type: 'dm',
                         name: r.name,
@@ -335,7 +377,7 @@
                         avatar: 'https://github.com/' + r.peer + '.png?size=80',
                         updatedAt: r.updatedAt
                     });
-                });
+                }, this);
             } catch (e) {
                 if (global.console) console.warn('[私聊] 载入失败', e.message);
             }
@@ -458,10 +500,11 @@
         /** 列出我参与的群（通过仓库名前缀识别） */
         async listGroups() {
             var r = await API.req('/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator');
-            var mine = Store.me.login.toLowerCase();
             var out = [];
             (r.data || []).forEach(function (repo) {
                 if (!Group.isGroup(repo.name)) return;
+                // 已解除绑定的不再出现
+                if (this.ls('fh:hidden:' + repo.owner.login + '/' + repo.name)) return;
                 out.push({
                     type: 'group',
                     name: repo.name,
@@ -471,7 +514,7 @@
                     updatedAt: repo.updated_at,
                     private: repo.private
                 });
-            });
+            }, this);
             return out;
         },
 
@@ -479,19 +522,69 @@
             var list = document.getElementById('conv-list');
             var self = this;
             var kw = this.searchKw;
+            var isContacts = this.view === 'contacts';
 
             var items = this.convs.filter(function (c) {
+                // 通讯录只列人（单聊），群聊在"聊天"里
+                if (isContacts && c.type !== 'dm') return false;
                 if (!kw) return true;
-                return String(c.title).toLowerCase().indexOf(kw) >= 0;
+                // 搜索时昵称也要能命中
+                var hay = String(self.displayName(c) + ' ' + c.title + ' ' + (c.peer || '')).toLowerCase();
+                return hay.indexOf(kw) >= 0;
             });
 
+            list.innerHTML = '';
+
+            // 通讯录：待接受的邀请就是「新的朋友」
+            if (isContacts && this.invites && this.invites.length) {
+                var h = document.createElement('div');
+                h.className = 'list-sep';
+                h.textContent = '新的朋友';
+                list.appendChild(h);
+                this.invites.forEach(function (inv) {
+                    var el = document.createElement('div');
+                    el.className = 'conv-item';
+                    var img = document.createElement('img');
+                    img.className = 'conv-avatar';
+                    img.src = 'https://github.com/' + inv.peer + '.png?size=80';
+                    img.alt = '';
+                    el.appendChild(img);
+                    var main = document.createElement('div');
+                    main.className = 'conv-main';
+                    var nm = document.createElement('div');
+                    nm.className = 'conv-name';
+                    nm.textContent = inv.peer + (inv.isGroup ? '（拉你进群）' : '');
+                    var pv = document.createElement('div');
+                    pv.className = 'conv-preview';
+                    pv.textContent = '请求添加你为好友';
+                    main.appendChild(nm);
+                    main.appendChild(pv);
+                    el.appendChild(main);
+                    var acc = document.createElement('button');
+                    acc.className = 'invite-accept';
+                    acc.textContent = '接受';
+                    acc.onclick = function (e) {
+                        e.stopPropagation();
+                        self.acceptInvite(inv, acc);
+                    };
+                    el.appendChild(acc);
+                    list.appendChild(el);
+                });
+                var h2 = document.createElement('div');
+                h2.className = 'list-sep';
+                h2.textContent = '联系人';
+                list.appendChild(h2);
+            }
+
             if (!items.length) {
-                list.innerHTML = '<div class="loading">' +
-                    (kw ? '没有匹配的会话' : '还没有会话，点右上角 ＋ 发起') + '</div>';
+                var empty = document.createElement('div');
+                empty.className = 'loading';
+                empty.textContent = kw ? '没有匹配的会话'
+                    : (isContacts ? '还没有联系人' : '还没有会话，点右上角 ＋ 发起');
+                list.appendChild(empty);
                 return;
             }
 
-            list.innerHTML = '';
             items.forEach(function (c) {
                 var el = document.createElement('div');
                 el.className = 'conv-item' +
@@ -511,20 +604,34 @@
                 top.className = 'conv-top';
                 var nm = document.createElement('span');
                 nm.className = 'conv-name';
-                nm.textContent = c.type === 'group' ? '👥 ' + c.title : c.title;
+                // 昵称优先（我自己的备注），群聊显示群名
+                nm.textContent = (c.type === 'group' ? '👥 ' : '') + self.displayName(c);
                 var tm = document.createElement('span');
                 tm.className = 'conv-time';
-                tm.textContent = c.updatedAt ? self.timeAgo(new Date(c.updatedAt).getTime()) : '';
+                if (!isContacts) {
+                    tm.textContent = c.updatedAt
+                        ? self.timeAgo(new Date(c.updatedAt).getTime()) : '';
+                }
                 top.appendChild(nm);
                 top.appendChild(tm);
                 main.appendChild(top);
 
-                var pv = document.createElement('div');
-                pv.className = 'conv-preview';
-                pv.textContent = c.type === 'group' ? '群聊' : '🔒 加密会话';
-                main.appendChild(pv);
+                if (!isContacts) {
+                    var pv = document.createElement('div');
+                    pv.className = 'conv-preview';
+                    pv.textContent = c.type === 'group' ? '群聊' : '🔒 加密会话';
+                    main.appendChild(pv);
+                }
 
                 el.appendChild(main);
+
+                // 未读红点（只在"聊天"tab 显示）
+                if (!isContacts && self.isUnread(c)) {
+                    var dot = document.createElement('i');
+                    dot.className = 'conv-badge';
+                    dot.textContent = '';
+                    el.appendChild(dot);
+                }
 
                 el.onclick = function () { self.openConv(c); };
                 list.appendChild(el);
@@ -555,11 +662,13 @@
         async openConv(c) {
             this.current = c;
             this.e2eState = null;
+            this._lastSig = null;        // 换会话，指纹必须重置
+            this.markSeen(c, Date.now());
             document.getElementById('app').classList.add('show-chat');
 
             document.getElementById('chat-head').style.display = '';
             document.getElementById('composer').style.display = '';
-            document.getElementById('chat-title').textContent = c.title;
+            document.getElementById('chat-title').textContent = this.displayName(c);
             document.getElementById('chat-sub').textContent =
                 c.type === 'group' ? '群聊 · ' + c.name : '🔒 端到端加密';
 
@@ -605,7 +714,9 @@
         async openGroup(c) {
             var meta = await Group.meta(c.owner, c.name);
             this.current.meta = meta;
-            document.getElementById('chat-title').textContent = meta.name || c.title;
+            // 昵称是本地备注，优先级最高；否则用群名（所有人共享）
+            document.getElementById('chat-title').textContent =
+                this.getNick(c.owner, c.name) || meta.name || c.title;
             document.getElementById('chat-sub').textContent =
                 (meta.members ? meta.members.length : 1) + ' 人';
 
@@ -713,6 +824,10 @@
             var myLogin = Store.me.login;
             var self = this;
 
+            // 记住滚动位置：正在翻历史的人不该被轮询拽回底部
+            var wasAtBottom = (box.scrollHeight - box.scrollTop - box.clientHeight) < 80;
+            var keepTop = box.scrollTop;
+
             box.innerHTML = '';
             if (!msgs.length) {
                 box.innerHTML = '<div class="welcome"><p>还没有消息，说第一句吧</p></div>';
@@ -767,7 +882,9 @@
                 box.appendChild(row);
             });
 
-            box.scrollTop = box.scrollHeight;
+            // 只在原本就贴着底部时才跟到底部；否则维持原位置
+            if (wasAtBottom) box.scrollTop = box.scrollHeight;
+            else box.scrollTop = keepTop;
         },
 
         // ── 发送 ───────────────────────────────────────────────
@@ -873,6 +990,8 @@
                     var peer = (document.getElementById('dm-peer').value || '').trim();
                     if (!peer) throw new Error('请输入用户名');
                     var room = await Chat.start(peer);
+                    // 之前解除绑定过 → 清掉隐藏标记，让它重新出现在列表
+                    this.ls('fh:hidden:' + room.owner + '/' + room.name, null);
                     this.closeNew();
                     this.toast(room.existed ? '已有会话' : '会话已创建，已邀请 ' + peer);
                     await this.loadConvs();
@@ -909,7 +1028,16 @@
             }
         },
 
-        // ── 会话详情 ───────────────────────────────────────────
+        // ── 会话详情 / 管理面板 ────────────────────────────────
+        /**
+         * 管理面板
+         *
+         * 分四块，风险从低到高排列，危险操作一律红色 + 二次确认：
+         *   ① 名称（昵称本地 / 群名共享）
+         *   ② 成员（仅群聊）
+         *   ③ 信息（仓库、安全码）
+         *   ④ 危险操作（清空记录、解除绑定）
+         */
         async openInfo() {
             var c = this.current;
             if (!c) return;
@@ -917,38 +1045,314 @@
             body.innerHTML = '<div class="loading">载入中…</div>';
             document.getElementById('info-modal').style.display = '';
 
-            var rows = [];
-            rows.push(['类型', c.type === 'group' ? '群聊' : '单聊']);
-            rows.push(['仓库', c.name]);
-
+            var meta = null;
             if (c.type === 'group') {
-                try {
-                    var meta = await Group.meta(c.owner, c.name);
-                    rows.push(['群名', this.esc(meta.name || '-')]);
-                    rows.push(['创建者', this.esc(meta.creator || '-')]);
-                    rows.push(['成员', (meta.members || []).join('、') || '-']);
-                } catch (e) {
-                    rows.push(['成员', '读取失败']);
-                }
-            } else {
-                rows.push(['对方', this.esc(c.peer || '-')]);
-                if (this.e2eState && this.e2eState.ready) {
-                    rows.push(['安全码', this.e2eState.safetyNumber || '-']);
-                }
+                try { meta = await Group.meta(c.owner, c.name); }
+                catch (e) { meta = { name: c.title, members: [], creator: c.owner }; }
+                this.current.meta = meta;
             }
 
             var html = '';
-            rows.forEach(function (r) {
-                html += '<div class="info-row"><span class="info-label">' +
-                    r[0] + '</span><span>' + r[1] + '</span></div>';
-            });
+
+            // ═══ ① 名称 ═══
+            html += '<h4 class="sec-h">名称</h4>';
+
+            var nick = this.getNick(c.owner, c.name);
+            html += '<div class="info-row">' +
+                '<span class="info-label">备注名<br><i class="lbl-tip">只有你自己看到</i></span>' +
+                '<span class="edit-cell">' +
+                '<input id="nick-input" class="inline-input" value="' + this.esc(nick) +
+                '" placeholder="' + this.esc(c.type === 'group' ? '群备注' : '备注名') + '">' +
+                '<button id="nick-save" class="btn-soft btn-sm">保存</button>' +
+                '</span></div>';
+
+            if (c.type === 'group') {
+                html += '<div class="info-row">' +
+                    '<span class="info-label">群名称<br><i class="lbl-tip">所有成员可见</i></span>' +
+                    '<span class="edit-cell">' +
+                    '<input id="gname-input" class="inline-input" value="' +
+                    this.esc(meta.name || c.title) + '" placeholder="群名称">' +
+                    '<button id="gname-save" class="btn-soft btn-sm">保存</button>' +
+                    '</span></div>';
+            }
+
+            // ═══ ② 成员（仅群聊）═══
+            if (c.type === 'group') {
+                var members = meta.members || [];
+                html += '<h4 class="sec-h">成员（' + members.length + '）</h4>';
+                html += '<div id="member-list">';
+                if (!members.length) {
+                    html += '<div class="info-row"><span class="info-label">暂无成员</span></div>';
+                } else {
+                    var myLogin = Store.me.login;
+                    members.forEach(function (m) {
+                        var isMe = String(m).toLowerCase() === myLogin.toLowerCase();
+                        var isCreator = String(m) === String(meta.creator);
+                        html += '<div class="info-row">' +
+                            '<span>' + this.esc(m) +
+                            (isCreator ? ' <i class="tag">创建者</i>' : '') +
+                            (isMe ? ' <i class="tag">我</i>' : '') + '</span>';
+                        if (!isMe) {
+                            html += '<button class="btn-danger btn-sm" data-remove="' +
+                                this.esc(m) + '">移除</button>';
+                        }
+                        html += '</div>';
+                    }, this);
+                }
+                html += '</div>';
+                html += '<div class="info-row">' +
+                    '<input id="new-member" class="inline-input grow" placeholder="添加成员（GitHub 用户名）">' +
+                    '<button id="add-member-btn" class="btn-primary btn-sm">添加</button>' +
+                    '</div>';
+                html += '<p class="hint">群名任何成员都能改（共享仓库的必然结果）。' +
+                    '移除成员会同时轮换群密钥。</p>';
+            }
+
+            // ═══ ③ 信息 ═══
+            html += '<h4 class="sec-h">信息</h4>';
+            html += '<div class="info-row"><span class="info-label">类型</span><span>' +
+                (c.type === 'group' ? '群聊' : '单聊') + '</span></div>';
+            html += '<div class="info-row"><span class="info-label">仓库</span>' +
+                '<span class="mono">' + this.esc(c.name) + '</span></div>';
+            if (c.type !== 'group') {
+                html += '<div class="info-row"><span class="info-label">对方</span><span>' +
+                    this.esc(c.peer || '-') + '</span></div>';
+            }
+            if (this.e2eState && this.e2eState.ready && this.e2eState.safetyNumber) {
+                html += '<div class="info-row"><span class="info-label">安全码</span>' +
+                    '<span class="mono">' + this.e2eState.safetyNumber + '</span></div>';
+            }
             html += '<div class="info-row"><span class="info-label">密钥备份</span>' +
                 '<button id="info-key-btn" class="btn-soft btn-sm">打开</button></div>';
-            body.innerHTML = html;
 
+            // ═══ ④ 危险操作 ═══
+            html += '<h4 class="sec-h danger">危险操作</h4>';
+            html += '<div class="info-row">' +
+                '<span class="info-label">清空聊天记录<br>' +
+                '<i class="lbl-tip">删除本会话所有消息</i></span>' +
+                '<button id="clear-msgs-btn" class="btn-danger btn-sm">清空</button></div>';
+            html += '<div class="info-row">' +
+                '<span class="info-label">' +
+                (c.type === 'group' ? '退出并解除绑定' : '解除绑定') + '<br>' +
+                '<i class="lbl-tip">' +
+                (c.type === 'group' ? '从群里退出，不再收到消息' : '从我的列表移除') +
+                '</i></span>' +
+                '<button id="unbind-btn" class="btn-danger btn-sm">解除</button></div>';
+            if (c.type === 'group' &&
+                String(c.owner).toLowerCase() === Store.me.login.toLowerCase()) {
+                html += '<div class="info-row">' +
+                    '<span class="info-label">删除整个群<br>' +
+                    '<i class="lbl-tip">你是创建者，可彻底删除仓库</i></span>' +
+                    '<button id="del-group-btn" class="btn-danger btn-sm">删除</button></div>';
+            }
+
+            body.innerHTML = html;
+            this.bindInfoActions(c, meta);
+        },
+
+        bindInfoActions(c, meta) {
             var self = this;
+
             var kb = document.getElementById('info-key-btn');
             if (kb) kb.onclick = function () { self.openKeyModal(); };
+
+            // ── 备注名（本地）──
+            var ns = document.getElementById('nick-save');
+            if (ns) ns.onclick = function () {
+                var v = document.getElementById('nick-input').value;
+                self.setNick(c.owner, c.name, v);
+                c.title = v || (c.type === 'group'
+                    ? (meta && meta.name) || c.title
+                    : c.peer);
+                self.toast(v ? '备注已保存' : '已清除备注');
+                self.renderConvs();
+                document.getElementById('chat-title').textContent = self.displayName(c);
+            };
+
+            // ── 群名（共享）──
+            var gs = document.getElementById('gname-save');
+            if (gs) gs.onclick = function () {
+                var v = (document.getElementById('gname-input').value || '').trim();
+                if (!v) return self.toast('群名不能为空', true);
+                gs.disabled = true;
+                Group.rename(c.owner, c.name, v).then(function (m) {
+                    self.current.meta = m;
+                    self.toast('群名已更新（所有成员可见）');
+                    self.renderConvs();
+                    if (!self.getNick(c.owner, c.name)) {
+                        document.getElementById('chat-title').textContent = v;
+                    }
+                    self.openInfo();
+                }).catch(function (e) {
+                    self.toast('改名失败：' + e.message, true);
+                    gs.disabled = false;
+                });
+            };
+
+            // ── 添加成员 ──
+            var am = document.getElementById('add-member-btn');
+            if (am) am.onclick = function () {
+                var inp = document.getElementById('new-member');
+                var who = (inp.value || '').trim();
+                if (!who) return self.toast('请输入用户名', true);
+                am.disabled = true;
+                am.textContent = '…';
+                var gk = API._ls('fh:gk:' + c.owner + '/' + c.name);
+                Group.addMember(c.owner, c.name, who, gk).then(function (r) {
+                    self.toast(r.keySent
+                        ? '已邀请 ' + who + '，群密钥同时发出'
+                        : '已邀请 ' + who + '（他登录后会收到群密钥）');
+                    inp.value = '';
+                    return self.openInfo();
+                }).then(function () {
+                    return self.loadConvs();
+                }).catch(function (e) {
+                    self.toast('添加失败：' + e.message, true);
+                    am.disabled = false;
+                    am.textContent = '添加';
+                });
+            };
+
+            // ── 移除成员 ──
+            Array.prototype.forEach.call(
+                document.querySelectorAll('[data-remove]'),
+                function (btn) {
+                    btn.onclick = function () {
+                        var who = btn.getAttribute('data-remove');
+                        if (!global.confirm(
+                            '移除 ' + who + '？\n\n' +
+                            '他将无法再访问本群，且群密钥会立即轮换\n' +
+                            '（他之前缓存的历史消息仍在他自己设备上）。'
+                        )) return;
+                        btn.disabled = true; btn.textContent = '…';
+                        Group.removeMember(c.owner, c.name, who).then(function (r) {
+                            self.toast('已移除 ' + who + (r.rotated ? '，群密钥已轮换' : ''));
+                            return self.openInfo();
+                        }).then(function () { return self.loadConvs(); })
+                          .catch(function (e) {
+                              self.toast('移除失败：' + e.message, true);
+                              btn.disabled = false; btn.textContent = '移除';
+                          });
+                    };
+                }
+            );
+
+            // ── 清空聊天记录 ──
+            var cm = document.getElementById('clear-msgs-btn');
+            if (cm) cm.onclick = function () {
+                if (!global.confirm(
+                    '清空本会话的全部聊天记录？\n\n' +
+                    '· 逐条删除，消息多时可能需要几秒\n' +
+                    '· 对方发的消息你删不掉（GitHub 只允许删自己的）\n' +
+                    '· 此操作不可恢复'
+                )) return;
+                cm.disabled = true;
+                API.clearMessages(c.owner, c.name, 1, function (done, total, failed) {
+                    cm.textContent = done + '/' + total;
+                }).then(function (r) {
+                    var msg = '已删除 ' + r.deleted + ' 条';
+                    if (r.failed) msg += '，' + r.failed + ' 条对方发的删不掉';
+                    self.toast(msg, r.failed > 0);
+                    API.clearMessageCache(c.owner, c.name);
+                    return self.openConv(c);
+                }).then(function () { return self.loadConvs(); })
+                  .catch(function (e) {
+                      self.toast('清空失败：' + e.message, true);
+                  }).then(function () {
+                      cm.disabled = false; cm.textContent = '清空';
+                  });
+            };
+
+            // ── 解除绑定 ──
+            var ub = document.getElementById('unbind-btn');
+            if (ub) ub.onclick = function () {
+                self.unbind(c, ub);
+            };
+
+            // ── 删除整个群（仅创建者）──
+            var dg = document.getElementById('del-group-btn');
+            if (dg) dg.onclick = function () {
+                if (!global.confirm(
+                    '彻底删除这个群？\n\n' +
+                    '仓库会被删除，所有成员的聊天记录都会消失。\n' +
+                    '此操作不可恢复。'
+                )) return;
+                dg.disabled = true; dg.textContent = '…';
+                API.req('/repos/' + c.owner + '/' + c.name, { method: 'DELETE' })
+                    .then(function () {
+                        self.toast('群已删除');
+                        self.current = null;
+                        document.getElementById('info-modal').style.display = 'none';
+                        document.getElementById('chat-head').style.display = 'none';
+                        document.getElementById('composer').style.display = 'none';
+                        document.getElementById('messages').innerHTML =
+                            '<div class="welcome"><p>选择一个会话开始聊天</p></div>';
+                        document.getElementById('app').classList.remove('show-chat');
+                        return self.loadConvs();
+                    })
+                    .catch(function (e) {
+                        self.toast('删除失败：' + e.message, true);
+                        dg.disabled = false; dg.textContent = '删除';
+                    });
+            };
+        },
+
+        /**
+         * 解除绑定
+         *
+         * 单聊和群聊语义不同：
+         *   · 单聊 → 从我的列表移除（仓库是两人共享的，不擅自删）
+         *   · 群聊 → 退出群（去掉自己的协作者身份）
+         * 自己建的群不能"退出"（GitHub 不让 owner 移除自己），
+         * 那种情况要走"删除整个群"。
+         */
+        async unbind(c, btn) {
+            var self = this;
+            var isGroup = c.type === 'group';
+
+            if (!global.confirm(isGroup
+                ? '退出这个群？\n\n你将不再收到消息。'
+                : '解除与 ' + (this.displayName(c)) + ' 的绑定？\n\n' +
+                  '会话会从你的列表移除。聊天记录仍留在仓库里。'
+            )) return;
+
+            if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
+            try {
+                if (isGroup) {
+                    var r = await Group.leave(c.owner, c.name);
+                    if (!r.ok) {
+                        if (r.reason === 'is-owner') {
+                            self.toast('你是群创建者，不能退出 —— 请用下面的「删除整个群」', true);
+                            if (btn) { btn.disabled = false; btn.textContent = '解除'; }
+                            return;
+                        }
+                        throw new Error('退出失败');
+                    }
+                }
+
+                // 清本地缓存（无论如何都要清）
+                API.clearMessageCache(c.owner, c.name);
+                API._ls('fh:gk:' + c.owner + '/' + c.name, null);
+
+                // 从列表移除：用"隐藏"标记，否则下次拉仓库列表它又回来了
+                this.ls('fh:hidden:' + c.owner + '/' + c.name, '1');
+
+                this.current = null;
+                document.getElementById('info-modal').style.display = 'none';
+                document.getElementById('chat-head').style.display = 'none';
+                document.getElementById('composer').style.display = 'none';
+                document.getElementById('e2e-bar').style.display = 'none';
+                document.getElementById('messages').innerHTML =
+                    '<div class="welcome"><p>选择一个会话开始聊天</p></div>';
+                document.getElementById('app').classList.remove('show-chat');
+
+                this.toast(isGroup ? '已退出群聊' : '已解除绑定');
+                await this.loadConvs();
+            } catch (e) {
+                this.toast('操作失败：' + (e.message || e), true);
+                if (btn) { btn.disabled = false; btn.textContent = '解除'; }
+            }
         },
 
         // ── 密钥备份 ───────────────────────────────────────────
@@ -1017,33 +1421,113 @@
             if (r.imported && this.current) this.openConv(this.current);
         },
 
-        // ── 轮询（轻量）─────────────────────────────────────────
+        // ── 轮询 ───────────────────────────────────────────────
+        /**
+         * 双层轮询
+         *
+         *   快（5s）：当前会话的消息 —— ETag 命中 304 不扣配额，
+         *             所以 5 秒和 15 秒成本一样，但体验快 3 倍
+         *   慢（60s）：会话列表 + 未读红点 —— 拉仓库列表本身要花钱，
+         *             所以放慢；未读靠 updated_at 判断，不用拉消息
+         *
+         * 另外三个必须处理的场景：
+         *   · 切回标签页立刻拉一次（不能等下一个 tick）
+         *   · 后台时不轮询（省配额），回前台补一次
+         *   · 轮询出错不能让整个定时器死掉
+         */
         startPolling() {
             var self = this;
-            // 只在有打开会话时刷新消息，避免空转耗配额
+
+            // 快轮询：当前会话
             setInterval(function () {
                 if (!self.current) return;
+                if (self._polling) return;          // 上一次还没结束，跳过
                 if (document.hidden) return;
                 self.refreshCurrent();
-            }, 15000);
+            }, this.FAST_POLL);
+
+            // 慢轮询：会话列表 + 未读
+            setInterval(function () {
+                if (document.hidden) return;
+                self.loadConvs();
+            }, this.SLOW_POLL);
+
+            // 切回前台立刻补一次 —— 否则要等满一个周期
+            document.addEventListener('visibilitychange', function () {
+                if (document.hidden) return;
+                if (self.current) self.refreshCurrent();
+                self.loadConvs();
+            });
+
+            // 窗口获得焦点也补一次（并排两个窗口时很有用）
+            global.addEventListener('focus', function () {
+                if (self.current) self.refreshCurrent();
+            });
         },
+
+        FAST_POLL: 5000,
+        SLOW_POLL: 60000,
 
         async refreshCurrent() {
             var c = this.current;
             if (!c) return;
+            if (this._polling) return;              // 防重入
+            this._polling = true;
+
             try {
+                var msgs;
                 if (c.type === 'dm') {
                     var e2e = this.e2eState || {};
-                    var msgs = await Chat.messages(c.owner, c.name, true, {
+                    msgs = await Chat.messages(c.owner, c.name, true, {
                         myLogin: Store.me.login,
                         peerPub: e2e.peerPub
                     });
-                    this.renderMessages(msgs);
                 } else {
-                    var g = await Group.messages(c.owner, c.name, true);
-                    this.renderMessages(g);
+                    msgs = await Group.messages(c.owner, c.name, true);
                 }
-            } catch (e) { /* 轮询失败静默，不打扰用户 */ }
+
+                // 内容没变就别重绘 —— 否则每次轮询都会把滚动条拽到底，
+                // 正在翻历史记录的人会被强行拉回最新
+                var sig = this._signature(msgs);
+                if (sig !== this._lastSig) {
+                    this._lastSig = sig;
+                    this.renderMessages(msgs);
+                }
+
+                if (msgs.length) {
+                    this.markSeen(c, msgs[msgs.length - 1].ts);
+                }
+            } catch (e) {
+                // 静默但不完全无声：控制台留痕，方便排查
+                if (global.console) console.warn('[轮询] 刷新失败', e.message);
+            } finally {
+                this._polling = false;              // 出错也必须解锁
+            }
+        },
+
+        /** 消息指纹：只有条数和最后一条变了才重绘 */
+        _signature: function (msgs) {
+            if (!msgs || !msgs.length) return '0';
+            var last = msgs[msgs.length - 1];
+            return msgs.length + ':' + (last.id || '') + ':' + (last.ts || '');
+        },
+
+        /** 标记已读（用于未读红点） */
+        markSeen: function (c, ts) {
+            this.ls('fh:seen:' + c.owner + '/' + c.name, String(ts || Date.now()));
+            if (this._unread && this._unread[c.name]) {
+                delete this._unread[c.name];
+                this.renderConvs();
+            }
+        },
+
+        /** 是否已读 */
+        isUnread: function (c) {
+            if (this.current && this.current.name === c.name) return false;
+            var seen = parseInt(this.ls('fh:seen:' + c.owner + '/' + c.name) || '0', 10);
+            if (!seen) return false;                // 从没打开过不算未读
+            var t = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
+            return t > seen;
         },
 
         // ── 工具 ───────────────────────────────────────────────
