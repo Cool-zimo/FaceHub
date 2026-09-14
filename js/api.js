@@ -363,12 +363,53 @@
          * 为什么不用文件：追加文件要先读 sha 再写，两人同时发必然 409 冲突。
          * issue 评论天然支持并发追加，还自带作者、头像、时间戳。
          */
+        /**
+         * 拉消息（ETag 条件请求）
+         *
+         * 为什么必须加 ETag：新消息要轮询才看得到，而轮询会疯狂吃配额。
+         * 没有新消息时 GitHub 返回 304，**不扣配额** —— 这样 5 秒一查
+         * 也几乎不花钱，跟 15 秒一查的成本一样。
+         *
+         * ⚠️ 关键：304 必须返回**本地缓存的上一次结果**。
+         * 返回 [] 会让消息凭空消失 —— 这是条件请求最容易踩的坑。
+         */
         async messages(owner, repo, issueNumber, since) {
             var q = '/repos/' + owner + '/' + repo + '/issues/' +
                 (issueNumber || 1) + '/comments?per_page=100';
             if (since) q += '&since=' + encodeURIComponent(since);
-            var r = await this.req(q);
-            return r.data || [];
+
+            var base = owner + '/' + repo;
+            var tagKey = 'fh:etagmsg:' + base;
+            var rawKey = 'fh:msgraw:' + base;
+
+            var etag = this._ls(tagKey);
+            var opts = {};
+            if (etag) opts.headers = { 'If-None-Match': etag };
+
+            var r = await this.req(q, opts);
+
+            if (r.__status === 304) {
+                var cached = this._ls(rawKey);
+                if (cached) {
+                    try { return JSON.parse(cached); } catch (e) { /* 坏了重拉 */ }
+                }
+                // 缓存没了就无条件再拉一次，宁可多花一次也别显示空白
+                r = await this.req(q);
+            }
+
+            var list = r.data || [];
+            var newTag = r.__headers && r.__headers.get ? r.__headers.get('etag') : null;
+            if (newTag) this._ls(tagKey, newTag);
+            this._ls(rawKey, JSON.stringify(list));
+            return list;
+        },
+
+        /** 清掉某个会话的消息缓存与 ETag（清空记录 / 解除绑定时用） */
+        clearMessageCache(owner, repo) {
+            var base = owner + '/' + repo;
+            this._ls('fh:etagmsg:' + base, null);
+            this._ls('fh:msgraw:' + base, null);
+            this._ls('fh:msg:' + base, null);
         },
 
         /** 发消息 */
@@ -387,6 +428,59 @@
                 { method: 'DELETE' }
             );
             return true;
+        },
+
+        /**
+         * 清空聊天记录
+         *
+         * GitHub 没有批量删除接口，只能一条一条删。
+         * 所以这里必须上报进度 —— 几十条消息删起来要几秒，
+         * 不给反馈的话用户会以为卡死了。
+         *
+         * @param {function} onProgress (done, total)
+         */
+        async clearMessages(owner, repo, issueNumber, onProgress) {
+            var list = await this.messages(owner, repo, issueNumber);
+            var total = list.length;
+            var done = 0, failed = 0;
+
+            for (var i = 0; i < list.length; i++) {
+                try {
+                    await this.deleteMessage(owner, repo, list[i].id);
+                    done++;
+                } catch (e) {
+                    // 403 = 不是我发的消息，删不掉 —— 这很常见，
+                    // 对方发的消息只有他自己或仓库管理员能删
+                    failed++;
+                }
+                if (onProgress) onProgress(done + failed, total, failed);
+            }
+            return { total: total, deleted: done, failed: failed };
+        },
+
+        /** 列出协作者（成员管理用） */
+        async collaborators(owner, repo) {
+            var r = await this.req('/repos/' + owner + '/' + repo + '/collaborators?per_page=100');
+            return r.data || [];
+        },
+
+        /** 移除协作者 / 退出群（自己退用 leaveRepo） */
+        async removeCollaborator(owner, repo, username) {
+            await this.req(
+                '/repos/' + owner + '/' + repo + '/collaborators/' + username,
+                { method: 'DELETE' }
+            );
+            return true;
+        },
+
+        /**
+         * 退出别人的仓库
+         *
+         * 用同一个 DELETE 端点，但 username 传自己。
+         * 这是 GitHub 官方的"leave a repository"方式。
+         */
+        async leaveRepo(owner, repo, myLogin) {
+            return await this.removeCollaborator(owner, repo, myLogin);
         }
     };
 
