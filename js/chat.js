@@ -182,7 +182,10 @@
         async invitations() {
             var all = await API.invitations();
             return all.filter(function (inv) {
-                return Chat.isRoom(inv.repository ? inv.repository.name : '');
+                var n = inv.repository ? inv.repository.name : '';
+                // 私聊和群聊都要收进来，否则群里被邀请的人看不到入口
+                return Chat.isRoom(n) ||
+                       (global.Group && global.Group.isGroup(n));
             }).map(function (inv) {
                 var r = inv.repository;
                 return {
@@ -191,6 +194,7 @@
                     owner: r.owner.login,
                     peer: r.owner.login,          // 邀请方就是仓库所有者
                     private: r.private,
+                    isGroup: global.Group ? global.Group.isGroup(r.name) : false,
                     createdAt: inv.created_at
                 };
             });
@@ -298,20 +302,33 @@
                     });
                 });
             }
-            var aes = null;
+            // 候选密钥：身份密钥（新）优先，会话密钥（老数据）兜底。
+            // 历史消息可能是用旧密钥加密的，两个都试才能都解开。
+            var keys = [];
             try {
-                aes = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
-            } catch (e) {
-                aes = null;
-            }
+                var k1 = await E2E.deriveAesKeyByIdentity(opts.myLogin, opts.peerPub, repo);
+                if (k1) keys.push(k1);
+            } catch (e) { /* 忽略 */ }
+            try {
+                var k2 = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
+                if (k2) keys.push(k2);
+            } catch (e) { /* 忽略 */ }
+
             var out = [];
             for (var i = 0; i < msgs.length; i++) {
                 var m = msgs[i];
-                var r = await E2E.decrypt(aes, m.raw != null ? m.raw : m.text);
+                var src = m.raw != null ? m.raw : m.text;
+                var best = null;
+                for (var j = 0; j < keys.length; j++) {
+                    var r = await E2E.decrypt(keys[j], src);
+                    if (!r.locked && !r.plain) { best = r; break; }
+                    if (!best) best = r;
+                }
+                if (!best) best = { text: src, plain: true, locked: false };
                 out.push(Object.assign({}, m, {
-                    text: r.text,
-                    locked: !!r.locked,
-                    encrypted: !r.plain && !r.locked
+                    text: best.text,
+                    locked: !!best.locked,
+                    encrypted: !best.plain && !best.locked
                 }));
             }
             return out;
@@ -335,7 +352,12 @@
             var E2E = global.E2E;
             if (E2E && opts.peerPub) {
                 try {
-                    var aes = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
+                    // 身份密钥优先 —— 对方无需在线
+                    var aes = await E2E.deriveAesKeyByIdentity(opts.myLogin, opts.peerPub, repo);
+                    if (!aes) {
+                        // 没有身份私钥（老数据）→ 退回会话密钥
+                        aes = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
+                    }
                     if (!aes) throw new Error('派生密钥失败（本地可能没有私钥）');
                     body = await E2E.encrypt(aes, text);
                     wasEncrypted = true;
@@ -374,20 +396,39 @@
                 ready: false,
                 myPub: null,
                 peerPub: null,
-                peerReady: false
+                peerReady: false,
+                usingIdentity: false
             };
 
-            // ① 确保我有密钥对，并把公钥发布到仓库
+            // ① 我的身份密钥（长期，存在 facehub-{我}/pk.json）
             try {
-                await E2E.ensureKeyPair(myLogin, repo);
-                state.myPub = await E2E.publishPubKey(owner, repo, myLogin, branch);
+                state.myPub = (await E2E.ensureIdentity(myLogin)).pub;
+                state.usingIdentity = true;
             } catch (e) {
-                // 写公钥失败（比如权限刚生效）不致命，下次重试
                 state.publishError = e.message;
             }
 
+            // ①-b 仍然往会话仓库写一份旧式公钥：
+            //   一是兼容老客户端，二是对方可能只认这里
+            try {
+                await E2E.ensureKeyPair(myLogin, repo);
+                await E2E.publishPubKey(owner, repo, myLogin, branch);
+            } catch (e) { /* 不影响主流程 */ }
+
             // ② 读对方公钥
-            state.peerPub = await E2E.readPeerPubKey(owner, repo, peerLogin, branch);
+            //
+            // 【关键改动】优先读对方的**身份公钥**（facehub-{他}/pk.json）。
+            // 那是他登录时就发布的，跟他此刻在不在线无关 ——
+            // 所以只要对方装过 FaceHub，我立刻就能加密发消息。
+            state.peerPub = await E2E.readIdentity(peerLogin);
+            state.peerRegistered = !!state.peerPub;
+
+            if (!state.peerPub) {
+                // 退回会话仓库里的旧式公钥（对方可能是老版本）
+                state.peerPub = await E2E.readPeerPubKey(owner, repo, peerLogin, branch);
+            } else {
+                state.usingIdentity = true;
+            }
             state.peerReady = !!state.peerPub;
 
             // ②-b 公钥是否曾被换过（MITM 检测）
