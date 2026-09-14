@@ -70,6 +70,128 @@
             return data;
         },
 
+        // ═══ 长期身份密钥 ═══════════════════════════════════
+        //
+        // 为什么要这套：原来的密钥是**按会话生成**的，对方必须先
+        // 打开应用、把公钥写进那个会话仓库，我才能加密 —— 所以永远
+        // "要等双方上线"。
+        //
+        // 改成：每个人有一把**长期身份密钥**，登录后自动发布到自己
+        // 的公开仓库 facehub-{login}/pk.json。任何人想给我发加密消息，
+        // 直接去读那个文件就行 —— 我不需要在线。
+        //
+        // 这就是 Signal 的 prekey / PGP 公钥服务器同一个思路：
+        // 公钥放在"谁都能读"的地方。
+
+        /** 身份密钥的本地存储键 */
+        _idKey: function (login) {
+            return 'fh:id:' + String(login).toLowerCase();
+        },
+
+        /**
+         * 取（或生成）我的长期身份密钥
+         * 与会话无关，所以只按 login 存一份
+         */
+        async ensureIdentity(login) {
+            var k = this._idKey(login);
+            var existing = API._ls(k);
+            if (existing) {
+                try {
+                    var d = JSON.parse(existing);
+                    if (d && d.priv && d.pub) return d;
+                } catch (e) { /* 坏了重建 */ }
+            }
+
+            var pair = await global.crypto.subtle.generateKey(
+                { name: 'ECDH', namedCurve: 'P-256' },
+                true,
+                ['deriveKey', 'deriveBits']
+            );
+            var privRaw = await global.crypto.subtle.exportKey('pkcs8', pair.privateKey);
+            var pubRaw = await global.crypto.subtle.exportKey('raw', pair.publicKey);
+
+            var data = {
+                priv: this._b64(privRaw),
+                pub: this._b64(pubRaw),
+                createdAt: Date.now()
+            };
+            API._ls(k, JSON.stringify(data));
+            return data;
+        },
+
+        /**
+         * 发布身份公钥到我的公开仓库
+         * 幂等：公钥没变就不重复写，省配额
+         */
+        async publishIdentity(login) {
+            var id = await this.ensureIdentity(login);
+            var repo = 'facehub-' + String(login).toLowerCase();
+            var path = 'pk.json';
+
+            var content = JSON.stringify({
+                login: login,
+                pub: id.pub,
+                alg: 'ECDH-P256',
+                kind: 'identity',
+                publishedAt: new Date().toISOString()
+            });
+
+            // 读已发布的公钥，判断是否与本机一致
+            var published = null;
+            try {
+                var d = JSON.parse(await API.readFile(login, repo, path, 'main', true));
+                published = d && d.pub ? d.pub : null;
+            } catch (e) { published = null; }
+
+            if (published === id.pub) {
+                return { pub: id.pub, skipped: true };
+            }
+
+            // 已存在**不同**的公钥：要么我在新设备登录，要么被别人改过。
+            // 不静默覆盖 —— 先告诉上层，由 UI 决定并提示用户。
+            var rotated = !!published;
+
+            var sha = null;
+            try { sha = await API.sha(login, repo, path, 'main'); } catch (e) { sha = null; }
+            await API.writeFile(login, repo, path, content, '发布加密公钥（身份密钥）', sha, 'main');
+
+            return {
+                pub: id.pub, skipped: false,
+                rotated: rotated,
+                previousPub: published
+            };
+        },
+
+        /**
+         * 读某人的身份公钥（从他自己的公开仓库）
+         *
+         * 这是"不用等对方上线"的关键：只要对方装过一次 FaceHub，
+         * 他的公钥就一直挂在 facehub-{login} 上，随时可读。
+         *
+         * @returns {string|null} 对方从没用过 FaceHub 则返回 null
+         */
+        async readIdentity(login) {
+            var repo = 'facehub-' + String(login).toLowerCase();
+            try {
+                var txt = await API.readFile(login, repo, 'pk.json', 'main', true);
+                var d = JSON.parse(txt);
+                return d.pub || null;
+            } catch (e) {
+                return null;
+            }
+        },
+
+        /**
+         * 用身份密钥派生会话密钥
+         *
+         * @param {string} saltKey 参与 salt 的确定性字符串。
+         *   私聊传仓库名 → 每个会话密钥不同（一个会话被破不影响别的）
+         */
+        async deriveAesKeyByIdentity(login, peerPubB64, saltKey) {
+            var id = await this.ensureIdentity(login);
+            return await this.deriveAesKeyWith(login, id.priv, saltKey, peerPubB64);
+        },
+
         /** 把对方的公钥导入成 CryptoKey */
         async _importPeerPub(b64Raw) {
             return await global.crypto.subtle.importKey(
@@ -111,9 +233,21 @@
             try { mine = JSON.parse(raw); } catch (e) { return null; }
             if (!mine || !mine.priv) return null;
 
-            if (!peerPubB64) return null;
+            return await this.deriveAesKeyWith(login, mine.priv, room, peerPubB64);
+        },
 
-            var priv = await this._importOwnPriv(mine.priv);
+        /**
+         * 用指定私钥派生 AES 密钥
+         *
+         * @param {string} privB64 我的私钥（pkcs8 base64）
+         * @param {string} saltKey 参与 salt 计算的确定性字符串。
+         *   私聊传**仓库名**，保证同一会话两人 salt 一致；
+         *   群聊传仓库名，所有人一致。
+         */
+        async deriveAesKeyWith(login, privB64, saltKey, peerPubB64) {
+            if (!privB64 || !peerPubB64) return null;
+
+            var priv = await this._importOwnPriv(privB64);
             var pub = await this._importPeerPub(peerPubB64);
 
             var bits = await global.crypto.subtle.deriveBits(
@@ -126,8 +260,8 @@
             var ikm = await global.crypto.subtle.importKey(
                 'raw', bits, 'HKDF', false, ['deriveBits']
             );
-            // salt 必须双方一致 → 用确定性值（房间名）
-            var salt = new TextEncoder().encode('facehub:' + room);
+            // salt 必须双方一致 → 用确定性值
+            var salt = new TextEncoder().encode('facehub:' + saltKey);
 
             var prk = await global.crypto.subtle.deriveBits(
                 { name: 'HKDF', hash: 'SHA-256', salt: salt, info: new TextEncoder().encode('aes') },
@@ -260,6 +394,66 @@
             }
         },
 
+        // ── 群密钥 ───────────────────────────────────────────
+
+        /**
+         * 生成群密钥
+         *
+         * 私聊靠 ECDH 双方各自算出同一个密钥，但群里有 N 个人，
+         * N 方 ECDH 不现实。所以用一个随机的**群密钥**加密消息，
+         * 再把这个群密钥分别加密给每个成员。
+         *
+         * 分发方式：
+         *   · 创建者生成 GK
+         *   · 对每个成员：用 ECDH(创建者私钥, 成员公钥) 派生密钥加密 GK
+         *   · 存到 gk/{成员小写}.json
+         *   · 成员用 ECDH(自己私钥, 创建者公钥) 解出 GK
+         *
+         * 这样 GitHub 上只有加密过的 GK，没有明文。
+         */
+        async generateGroupKey() {
+            var raw = global.crypto.getRandomValues(new Uint8Array(32));
+            return this._b64(raw);
+        },
+
+        /**
+         * 把群密钥加密给某个成员
+         *
+         * 用身份密钥 → 建群那一刻就能分发，不用等成员上线。
+         */
+        async wrapGroupKey(gkB64, myLogin, repo, memberPub) {
+            var aes = await this.deriveAesKeyByIdentity(myLogin, memberPub, repo);
+            if (!aes) return null;
+            return await this.encrypt(aes, gkB64);
+        },
+
+        /**
+         * 解出群密钥
+         *
+         * 必须用**分发者**的公钥，不能写死创建者 ——
+         * 补发群密钥的可能不是创建者（比如创建者不在线，另一个
+         * 老成员给新人分发）。所以分发时要把分发者公钥一起存下来。
+         */
+        async unwrapGroupKey(wrapped, myLogin, repo, wrapperPub) {
+            var aes = await this.deriveAesKeyByIdentity(myLogin, wrapperPub, repo);
+            if (!aes) return null;
+            var r = await this.decrypt(aes, wrapped);
+            return r.locked ? null : r.text;
+        },
+
+        /** 把 b64 群密钥导入成 AES CryptoKey */
+        async importGroupKey(gkB64) {
+            return await global.crypto.subtle.importKey(
+                'raw', this._unb64(gkB64), { name: 'AES-GCM' }, false,
+                ['encrypt', 'decrypt']
+            );
+        },
+
+        /** 群密钥文件路径 */
+        _gkPath: function (login) {
+            return 'gk/' + String(login).toLowerCase() + '.json';
+        },
+
         /**
          * 公钥指纹（短哈希，仅用于诊断）
          *
@@ -290,16 +484,35 @@
          * 所以界面上必须明说：这是一份明文私钥，谁拿到谁就能解密。
          */
         exportBackup() {
-            var out = { v: 1, type: 'facehub-keys', rooms: {} };
-            var prefix = 'fh:sk:';
+            var out = {
+                v: 2,                       // v2：加入身份密钥
+                type: 'facehub-keys',
+                rooms: {},                  // 会话密钥（旧式）
+                identities: {}              // 身份密钥（新式，更重要）
+            };
+
+            // 身份密钥 —— 丢了它所有会话都解不开，必须备份
+            var idPrefix = 'fh:id:';
             for (var i = 0; i < localStorage.length; i++) {
                 var k = localStorage.key(i);
-                if (!k || k.indexOf(prefix) !== 0) continue;
+                if (!k || k.indexOf(idPrefix) !== 0) continue;
                 try {
                     var d = JSON.parse(localStorage.getItem(k));
-                    if (d && d.priv) out.rooms[k.slice(prefix.length)] = d;
+                    if (d && d.priv) out.identities[k.slice(idPrefix.length)] = d;
                 } catch (e) { /* 跳过坏数据 */ }
             }
+
+            // 会话密钥（兼容旧数据）
+            var prefix = 'fh:sk:';
+            for (var j = 0; j < localStorage.length; j++) {
+                var k2 = localStorage.key(j);
+                if (!k2 || k2.indexOf(prefix) !== 0) continue;
+                try {
+                    var d2 = JSON.parse(localStorage.getItem(k2));
+                    if (d2 && d2.priv) out.rooms[k2.slice(prefix.length)] = d2;
+                } catch (e) { /* 跳过坏数据 */ }
+            }
+
             out.exportedAt = new Date().toISOString();
             return JSON.stringify(out, null, 2);
         },
@@ -315,34 +528,51 @@
             try { data = JSON.parse(json); } catch (e) {
                 return { imported: 0, skipped: 0, error: '不是有效的 JSON' };
             }
-            if (!data || data.type !== 'facehub-keys' || !data.rooms) {
+            if (!data || data.type !== 'facehub-keys') {
                 return { imported: 0, skipped: 0, error: '不是 FaceHub 密钥备份' };
             }
-
-            var imported = 0, skipped = 0;
-            var prefix = 'fh:sk:';
-            for (var key in data.rooms) {
-                if (!Object.prototype.hasOwnProperty.call(data.rooms, key)) continue;
-                var d = data.rooms[key];
-                if (!d || !d.priv || !d.pub) { skipped++; continue; }
-
-                var lsKey = prefix + key;
-                var exists = !!localStorage.getItem(lsKey);
-                if (exists && !overwrite) { skipped++; continue; }
-
-                localStorage.setItem(lsKey, JSON.stringify(d));
-                imported++;
+            // v1 只有 rooms；v2 起有 identities。两者都要能导入。
+            if (!data.rooms && !data.identities) {
+                return { imported: 0, skipped: 0, error: '备份里没有任何密钥' };
             }
-            return { imported: imported, skipped: skipped, error: null };
+
+            var imported = 0, skipped = 0, ids = 0;
+
+            var self = this;
+            function load(map, prefix, isIdentity) {
+                if (!map) return;
+                for (var key in map) {
+                    if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
+                    var d = map[key];
+                    if (!d || !d.priv || !d.pub) { skipped++; continue; }
+
+                    var lsKey = prefix + key;
+                    var exists = !!localStorage.getItem(lsKey);
+                    if (exists && !overwrite) { skipped++; continue; }
+
+                    localStorage.setItem(lsKey, JSON.stringify(d));
+                    imported++;
+                    if (isIdentity) ids++;
+                }
+            }
+
+            load(data.identities, 'fh:id:', true);
+            load(data.rooms, 'fh:sk:', false);
+
+            return {
+                imported: imported, skipped: skipped,
+                identities: ids, error: null
+            };
         },
 
-        /** 列出本地已有密钥的会话（供界面展示备份了哪些） */
+        /** 列出本地已有密钥（供界面展示备份了哪些） */
         listBackedUpRooms() {
-            var prefix = 'fh:sk:';
             var out = [];
             for (var i = 0; i < localStorage.length; i++) {
                 var k = localStorage.key(i);
-                if (k && k.indexOf(prefix) === 0) out.push(k.slice(prefix.length));
+                if (!k) continue;
+                if (k.indexOf('fh:id:') === 0) out.push('身份:' + k.slice(6));
+                else if (k.indexOf('fh:sk:') === 0) out.push(k.slice(6));
             }
             return out;
         },
