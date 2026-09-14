@@ -620,3 +620,15 @@ code {
     .modal-box { max-height: 92vh; }
     .key-text { height: 130px; }
 }
+
+/* ═══ 解不开的消息 ════════════════════════════════════ */
+.bubble-del {
+    align-self: center;
+    margin-left: 6px; padding: 2px 8px;
+    font-size: 11px; font-weight: 600;
+    background: rgba(255, 255, 255, .8);
+    border: 1px solid currentColor; border-radius: 4px;
+    color: #78350f; cursor: pointer; font-family: inherit;
+    flex-shrink: 0;
+}
+.bubble-del:hover { background: #78350f; color: #fff; }
