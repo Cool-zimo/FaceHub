@@ -292,6 +292,145 @@
             return { sent: sent };
         },
 
+        /**
+         * 改群名（所有人可见）
+         *
+         * 群名写进 group.json，所以任何有写权限的人都能改 ——
+         * 这一点跟微信"只有群主能改"不同，但这是共享仓库的必然结果。
+         * 提示里说明清楚，避免误解。
+         */
+        async rename(owner, name, newTitle) {
+            var meta = await this.meta(owner, name);
+            meta.name = newTitle;
+            var sha = null;
+            try { sha = await API.sha(owner, name, 'group.json', 'main'); }
+            catch (e) { sha = null; }
+            await API.writeFile(owner, name, 'group.json',
+                JSON.stringify(meta, null, 2), '群名改为：' + newTitle, sha, 'main');
+            return meta;
+        },
+
+        // ── 成员管理 ─────────────────────────────────────────
+
+        /**
+         * 移除成员
+         *
+         * 关键：移除后必须**轮换群密钥**。
+         * 否则他虽然看不了仓库了，但如果之前缓存过群密钥，
+         * 将来万一仓库被误设为公开，历史消息就全泄了。
+         *
+         * 轮换之所以现在可行，是因为身份公钥始终可读 ——
+         * 剩下的人哪怕不在线，也能用他们的身份公钥重新包装新密钥。
+         */
+        async removeMember(owner, name, login) {
+            var me = global.Store.me.login;
+            var meta = await this.meta(owner, name);
+            var E2E = global.E2E;
+
+            // ① 从成员列表移除
+            meta.members = (meta.members || []).filter(function (m) {
+                return String(m).toLowerCase() !== String(login).toLowerCase();
+            });
+
+            // ② 删掉他的群密钥文件
+            if (E2E) {
+                try {
+                    var gkPath = E2E._gkPath(login);
+                    var gsha = await API.sha(owner, name, gkPath, 'main');
+                    if (gsha) {
+                        await API.req('/repos/' + owner + '/' + name + '/contents/' + gkPath, {
+                            method: 'DELETE',
+                            body: { message: '移除成员 ' + login, sha: gsha, branch: 'main' }
+                        });
+                    }
+                } catch (e) { /* 可能本来就没有 */ }
+            }
+
+            // ③ 轮换群密钥，给剩下的人重新分发
+            var rotated = false;
+            if (E2E) {
+                try {
+                    var newGk = await E2E.generateGroupKey();
+                    var myPub = (await E2E.ensureIdentity(me)).pub;
+                    var selfW = await E2E.wrapGroupKey(newGk, me, name, myPub);
+                    if (selfW) {
+                        var p = E2E._gkPath(me);
+                        var s2 = null;
+                        try { s2 = await API.sha(owner, name, p, 'main'); } catch (e) { s2 = null; }
+                        await API.writeFile(owner, name, p,
+                            JSON.stringify({ for: me, gk: selfW, by: me, byPub: myPub }),
+                            '轮换群密钥（移除 ' + login + '）', s2, 'main');
+                        this._cacheGk(owner, name, newGk);
+                    }
+                    for (var i = 0; i < meta.members.length; i++) {
+                        var m = meta.members[i];
+                        if (!m) continue;
+                        var pub = await E2E.readIdentity(m);
+                        if (!pub) continue;
+                        var w = await E2E.wrapGroupKey(newGk, me, name, pub);
+                        if (!w) continue;
+                        var mp = E2E._gkPath(m);
+                        var sh = null;
+                        try { sh = await API.sha(owner, name, mp, 'main'); } catch (e) { sh = null; }
+                        await API.writeFile(owner, name, mp,
+                            JSON.stringify({ for: m, gk: w, by: me, byPub: myPub }),
+                            '轮换群密钥给 ' + m, sh, 'main');
+                    }
+                    rotated = true;
+                } catch (e) {
+                    // 轮换失败不阻断移除 —— 至少他已经失去仓库访问权限了
+                    if (global.console) console.warn('[群] 密钥轮换失败', e.message);
+                }
+            }
+
+            // ④ 写回成员列表
+            var msha = null;
+            try { msha = await API.sha(owner, name, 'group.json', 'main'); } catch (e) { msha = null; }
+            await API.writeFile(owner, name, 'group.json',
+                JSON.stringify(meta, null, 2), '移除成员 ' + login, msha, 'main');
+
+            // ⑤ 最后撤掉仓库权限（放最后，前面步骤都需要写权限）
+            try {
+                await API.removeCollaborator(owner, name, login);
+            } catch (e) { /* 可能自己不是管理员 */ }
+
+            return { rotated: rotated, members: meta.members };
+        },
+
+        /**
+         * 退出群
+         *
+         * 自己是 owner 时不能"退出"（GitHub 不允许 owner 移除自己），
+         * 那种情况只能删除整个仓库 —— 由上层提示用户选择。
+         */
+        async leave(owner, name) {
+            var me = global.Store.me.login;
+
+            // 清掉本地群密钥缓存
+            API._ls('fh:gk:' + owner + '/' + name, null);
+            API._ls('fh:msg:' + owner + '/' + name, null);
+
+            if (String(owner).toLowerCase() === String(me).toLowerCase()) {
+                return { ok: false, reason: 'is-owner' };
+            }
+
+            try {
+                // 先从成员列表里去掉自己
+                var meta = await this.meta(owner, name);
+                meta.members = (meta.members || []).filter(function (m) {
+                    return String(m).toLowerCase() !== me.toLowerCase();
+                });
+                try {
+                    var sha = await API.sha(owner, name, 'group.json', 'main');
+                    await API.writeFile(owner, name, 'group.json',
+                        JSON.stringify(meta, null, 2), me + ' 退出群', sha, 'main');
+                } catch (e) { /* 无所谓 */ }
+            } catch (e) { /* 无所谓 */ }
+
+            await API.leaveRepo(owner, name, me);
+            return { ok: true };
+        },
+
         // ── 消息 ─────────────────────────────────────────────
 
         async messages(owner, name, fresh) {
