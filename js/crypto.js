@@ -190,12 +190,25 @@
         // ── 公钥交换（存仓库）─────────────────────────────────
 
         /**
+         * 公钥文件路径（统一小写）
+         *
+         * 为什么要统一：**GitHub contents API 的路径大小写敏感**。
+         * 而 room.peer 来自 peerOf()，它是从全小写的仓库名里切出来的，
+         * 结果也是小写 —— 但发布时用的是 login 原始大小写（如 Cool-zimo）。
+         * 于是写 Cool-zimo.json、读 cool-zimo.json → 永远 404。
+         * 表现是"对方明明在线，却一直显示等待密钥交换"。
+         */
+        _pkPath: function (login) {
+            return 'pk/' + String(login).toLowerCase() + '.json';
+        },
+
+        /**
          * 发布我的公钥到仓库
-         * 路径 pk/{login}.json，双方各写各的，不会冲突
+         * 路径 pk/{小写login}.json，双方各写各的，不会冲突
          */
         async publishPubKey(owner, repo, login, branch) {
             var kp = await this.ensureKeyPair(login, repo);
-            var path = 'pk/' + login + '.json';
+            var path = this._pkPath(login);
             var content = JSON.stringify({
                 login: login,
                 pub: kp.pub,
@@ -211,17 +224,37 @@
 
         /**
          * 读对方的公钥
+         *
+         * 大小写不敏感：先按小写路径直读（快），读不到再列目录找。
+         * 列目录那步是为了兼容**历史遗留的大写文件** ——
+         * 早期版本按原始大小写写入（pk/Feng-zimo.json）。
          * @returns {string|null} 对方还没发布则返回 null
          */
         async readPeerPubKey(owner, repo, peerLogin, branch) {
-            var path = 'pk/' + peerLogin + '.json';
+            var want = String(peerLogin).toLowerCase();
+            var path = this._pkPath(peerLogin);
+
+            // ① 直读（绝大多数情况走这里）
             try {
-                // fresh=true：公钥是安全关键数据，绝不能读缓存。
-                // 否则攻击者换掉公钥后，用户可能因为缓存一直看到旧的，
-                // 换设备后才突然拿到假的 —— 检测时机被推迟，风险更高。
+                // fresh=true：公钥是安全关键数据，绝不能读缓存
                 var txt = await API.readFile(owner, repo, path, branch, true);
                 var d = JSON.parse(txt);
-                return d.pub || null;
+                if (d && d.pub) return d.pub;
+            } catch (e) { /* 落到 ② */ }
+
+            // ② 用 git tree 做大小写不敏感匹配（兼容旧文件 + 用户名大小写未知）
+            try {
+                var t = await API.tree(owner, repo, branch);
+                var hit = (t.files || []).filter(function (f) {
+                    var p = String(f.path || '');
+                    if (p.indexOf('pk/') !== 0) return false;
+                    return p.slice(3).toLowerCase() === want + '.json';
+                })[0];
+                if (!hit) return null;
+
+                var txt2 = await API.readFile(owner, repo, hit.path, branch, true);
+                var d2 = JSON.parse(txt2);
+                return (d2 && d2.pub) || null;
             } catch (e) {
                 return null;
             }
