@@ -330,15 +330,19 @@
 
             var body = text;
             var wasEncrypted = false;
+            var encError = null;
 
             var E2E = global.E2E;
             if (E2E && opts.peerPub) {
                 try {
                     var aes = await E2E.deriveAesKey(opts.myLogin, repo, opts.peerPub);
+                    if (!aes) throw new Error('派生密钥失败（本地可能没有私钥）');
                     body = await E2E.encrypt(aes, text);
                     wasEncrypted = true;
                 } catch (e) {
-                    // 加密失败就退回明文，不能让消息发不出去
+                    // 不能静默退回明文 —— 那会让用户以为加密了其实没有。
+                    // 记录原因，交给上层明确提示。
+                    encError = e.message;
                     body = text;
                 }
             }
@@ -347,6 +351,7 @@
             API._ls('fh:msg:' + owner + '/' + repo, null);
             API._ls('fh:rooms:etag', null);
             r.__encrypted = wasEncrypted;
+            r.__encError = encError;
             return r;
         },
 
@@ -407,11 +412,49 @@
 
                     // 安全码（供线下核对，防 MITM）
                     state.safetyNumber = await E2E.safetyNumber(repo, state.myPub, state.peerPub);
+
+                    // 诊断：打印双方公钥指纹。
+                    // 两边窗口的"对方指纹"应当相同；不同 = 密钥没协商成功，
+                    // 表现为能发消息但对面全是"解密失败"。
+                    try {
+                        state.myFp = await E2E.fingerprint(state.myPub);
+                        state.peerFp = await E2E.fingerprint(state.peerPub);
+                        if (global.console && console.log) {
+                            console.log('[E2E] ' + myLogin + ' 我的公钥 ' + state.myFp +
+                                ' / 读到 ' + peerLogin + ' 的公钥 ' + state.peerFp);
+                        }
+                    } catch (e) { /* 诊断失败无所谓 */ }
                 } catch (e) {
                     state.error = e.message;
                 }
             }
             return state;
+        },
+
+        /**
+         * 重新同步密钥
+         *
+         * 什么时候用：双方算出的共享密钥不一致，消息能发但对面对着
+         * 一片"解密失败"。成因通常是历史文件残留、某方换过设备等。
+         *
+         * 代价要说清楚：生成新密钥对后，**历史密文永久解不开**
+         * （旧密钥被覆盖）。所以界面上必须二次确认。
+         */
+        async resyncKey(owner, repo, myLogin, branch) {
+            var E2E = global.E2E;
+            if (!E2E) throw new Error('加密模块未加载');
+
+            // 丢弃本地私钥，强制重新生成
+            API._ls('fh:sk:' + myLogin + '/' + repo, null);
+            API._ls('fh:verified:' + myLogin + '/' + repo, null);
+            API._ls('fh:hadpub:' + myLogin + '/' + repo, null);
+
+            // 发布新公钥（覆盖同名文件）
+            var pub = await E2E.publishPubKey(owner, repo, myLogin, branch);
+
+            // 清掉消息缓存，强制重新拉取并尝试用新密钥解密
+            API._ls('fh:msg:' + owner + '/' + repo, null);
+            return pub;
         }
     };
 
