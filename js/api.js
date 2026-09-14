@@ -359,6 +359,15 @@
                 { method: 'POST', body: { body: text } }
             );
             return r.data;
+        },
+
+        /** 删消息（用于清理解不开的孤儿密文） */
+        async deleteMessage(owner, repo, commentId) {
+            await this.req(
+                '/repos/' + owner + '/' + repo + '/issues/comments/' + commentId,
+                { method: 'DELETE' }
+            );
+            return true;
         }
     };
 
