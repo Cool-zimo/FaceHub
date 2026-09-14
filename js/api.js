@@ -292,6 +292,25 @@
          * 建私有仓库（私聊会话用）
          * 已存在会 422，调用方据此判断"对方先建了"
          */
+        /**
+         * 创建公开仓库
+         *
+         * 用于放身份公钥 —— 必须是公开的，否则别人读不到，
+         * 就又退回"要等对方上线"了。里面只有公钥，本来就是要公开的。
+         */
+        async createPublicRepo(name, description) {
+            var r = await this.req('/user/repos', {
+                method: 'POST',
+                body: {
+                    name: name,
+                    description: description || '',
+                    private: false,
+                    auto_init: false
+                }
+            });
+            return r.data;
+        },
+
         async createPrivateRepo(name, description) {
             var r = await this.req('/user/repos', {
                 method: 'POST',
