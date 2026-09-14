@@ -260,6 +260,24 @@
             }
         },
 
+        /**
+         * 公钥指纹（短哈希，仅用于诊断）
+         *
+         * 为什么需要：密钥不同步时，双方各自算出的共享密钥不同，
+         * 表现为"能加密但解密全失败"，而且**没有任何报错**。
+         * 打印指纹后，两边一比对就知道是不是同一对公钥。
+         */
+        async fingerprint(pubB64) {
+            if (!pubB64) return null;
+            var d = await global.crypto.subtle.digest(
+                'SHA-256', new TextEncoder().encode(pubB64)
+            );
+            return Array.prototype.reduce.call(
+                new Uint8Array(d).slice(0, 3),
+                function (s, b) { return s + b.toString(16).padStart(2, '0'); }, ''
+            );
+        },
+
         // ── 密钥备份 ─────────────────────────────────────────
 
         /**
