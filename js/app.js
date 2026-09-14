@@ -408,6 +408,24 @@
                     peerPub: e2e && e2e.peerPub
                 });
                 this.renderMessages(msgs);
+
+                // 顺手修正对方用户名的大小写：
+                // room.peer 是从全小写仓库名里切出来的（cool-zimo），
+                // 但 GitHub 规范写法是 Cool-zimo。消息里带真实 login，
+                // 用它更新显示 —— 零额外请求，因为消息已经拉回来了。
+                var real = null;
+                for (var i = 0; i < msgs.length; i++) {
+                    if (msgs[i].from && msgs[i].from.toLowerCase() !== Store.me.login.toLowerCase()) {
+                        real = msgs[i].from;
+                        break;
+                    }
+                }
+                if (real && real !== room.peer) {
+                    room.peer = real;
+                    document.getElementById('chat-peer-name').textContent = real;
+                    document.getElementById('chat-peer-avatar').src =
+                        'https://github.com/' + real + '.png?size=80';
+                }
             } catch (e) {
                 box.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;color:#cf222e">' +
                     '载入失败：' + this.esc(e.message) + '</div>';
