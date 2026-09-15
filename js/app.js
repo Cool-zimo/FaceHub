@@ -280,6 +280,11 @@
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); self.sendMessage(); }
             });
 
+            // 附件
+            document.getElementById('attach-btn').onclick = function () {
+                self.sendAttachment();
+            };
+
             // 返回（移动端）
             document.getElementById('back-btn').onclick = function () {
                 document.getElementById('app').classList.remove('show-chat');
@@ -857,13 +862,54 @@
                     body.appendChild(s);
                 }
 
+                // 附件：本地刚上传的用 m.att（含 dataUrl，秒开），
+                // 服务器来的用信封解析。pending 也要解析，
+                // 否则会露出 FHATT1:{...} 这种原始串。
+                var att = null;
+                if (global.Attach && !m.locked) {
+                    att = m.att || Attach.parse(m.text);
+                }
+
                 var b = document.createElement('div');
                 b.className = 'bubble' +
                     (m.encrypted ? ' encrypted' : '') +
-                    (m.locked ? ' locked' : '');
-                b.textContent = m.text;
+                    (m.locked ? ' locked' : '') +
+                    (m.pending ? ' pending' : '') +
+                    (m.failed ? ' failed' : '') +
+                    (att ? ' bubble-att' : '');
                 if (m.encrypted) b.title = '端到端加密 · GitHub 只存了密文';
+                if (m.pending) b.title = '发送中…';
+                if (m.failed) b.title = '发送失败：' + (m.error || '');
+
+                if (att) {
+                    // 附件消息：渲染媒体预览而不是文本
+                    Attach.render(b, att, { owner: self.current.owner, repo: self.current.name });
+                } else {
+                    b.textContent = m.text;
+                }
                 body.appendChild(b);
+
+                if (m.failed) {
+                    var retry = document.createElement('button');
+                    retry.className = 'bubble-del';
+                    retry.textContent = '重试';
+                    retry.onclick = function () {
+                        self._removePending(m.id);
+                        var inp = document.getElementById('msg-input');
+                        inp.value = m.text;
+                        self._rerenderWithPending();
+                        inp.focus();
+                    };
+                    body.appendChild(retry);
+                    var drop = document.createElement('button');
+                    drop.className = 'bubble-del';
+                    drop.textContent = '删除';
+                    drop.onclick = function () {
+                        self._removePending(m.id);
+                        self._rerenderWithPending();
+                    };
+                    body.appendChild(drop);
+                }
 
                 if (m.locked && m.id) {
                     var del = document.createElement('button');
@@ -888,6 +934,18 @@
         },
 
         // ── 发送 ───────────────────────────────────────────────
+        /**
+         * 发消息（乐观更新）
+         *
+         * ★ 为什么必须乐观更新：
+         * 原来的流程是"发送 → 等 GitHub 返回 → 重新拉取 → 渲染"，
+         * 消息要等整个网络往返（几百毫秒到几秒）才出现，
+         * 而且一旦写入后读取有延迟（GitHub 各 CDN 节点不一致），
+         * 自己刚发的消息就是看不到 —— 只能刷新页面。
+         *
+         * 改成：本地**先上屏**（微信也是这么做的），网络结果后到再校正。
+         * 这样"发完立刻看到自己的消息"不再依赖网络，是必然的。
+         */
         async sendMessage() {
             var input = document.getElementById('msg-input');
             var c = this.current;
@@ -900,6 +958,20 @@
             input.value = '';
 
             var self = this;
+
+            // ① 立即上屏（本地气泡，标记 pending）
+            var temp = {
+                id: 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+                from: Store.me.login,
+                avatar: Store.me.avatar_url,
+                text: text,
+                raw: text,
+                ts: Date.now(),
+                pending: true
+            };
+            this._pending.push(temp);
+            this._rerenderWithPending();
+
             try {
                 var r;
                 if (c.type === 'dm') {
@@ -913,28 +985,175 @@
                     } else if (r && r.__encrypted === false && e2e.peerReady === false) {
                         this.toast('⚠️ 对方还没上线，本条明文发送');
                     }
-                    var msgs = await Chat.messages(c.owner, c.name, true, {
-                        myLogin: Store.me.login,
-                        peerPub: e2e.peerPub
-                    });
-                    this.renderMessages(msgs);
                 } else {
                     r = await Group.send(c.owner, c.name, text);
                     if (r && r.__encrypted === false) {
                         this.toast('⚠️ 还没有群密钥，本条明文发送');
                     }
-                    var gmsgs = await Group.messages(c.owner, c.name, true);
-                    this.renderMessages(gmsgs);
                 }
-                await this.loadConvs();
+
+                // ② 发送成功：撤掉本地气泡，换成服务器上的真实数据
+                this._removePending(temp.id);
+
+                // 发过的消息 ETag 一定变了，强制重拉一次避免拿到旧缓存
+                API.clearMessageCache(c.owner, c.name);
+
+                var msgs;
+                if (c.type === 'dm') {
+                    var e2e2 = this.e2eState || {};
+                    msgs = await Chat.messages(c.owner, c.name, true, {
+                        myLogin: Store.me.login,
+                        peerPub: e2e2.peerPub
+                    });
+                } else {
+                    msgs = await Group.messages(c.owner, c.name, true);
+                }
+
+                // 极端情况：服务器还没返回这条（写入传播延迟），
+                // 那就继续显示本地气泡，别让它凭空消失
+                if (!this._containsText(msgs, text)) {
+                    temp.pending = false;
+                    this._pending.push(temp);
+                }
+                this._rerenderWithPending(msgs);
+
+                // 列表顺序变了（最后更新时间）
+                this.loadConvs();
             } catch (e) {
-                this.toast('发送失败：' + (e && e.message ? e.message : e), true);
-                input.value = text;
+                // ③ 失败：气泡留在界面上，标红 + 可重试，不吞掉用户输入
+                temp.pending = false;
+                temp.failed = true;
+                temp.error = e && e.message ? e.message : String(e);
+                this._rerenderWithPending();
+                this.toast('发送失败：' + temp.error, true);
                 if (global.console) console.error('[发送]', e);
             } finally {
-                // 放 finally：哪怕上面任何一步抛错，按钮也必须恢复
                 btn.disabled = false;
             }
+        },
+
+        /** 待确认的本地消息（乐观更新用） */
+        _pending: [],
+
+        // ── 附件 ───────────────────────────────────────────────
+        async sendAttachment() {
+            var c = this.current;
+            if (!c) return;
+
+            var files = await Attach.pick(false);
+            if (!files || !files.length) return;
+
+            var parts = Attach.partition(files);
+            if (parts.tooBig.length) {
+                this.toast('「' + parts.tooBig[0].name + '」超过 ' +
+                    Attach.size(Attach.MAX_SIZE) + '，已跳过', true);
+            }
+            if (!parts.ok.length) return;
+
+            var file = parts.ok[0];
+            var self = this;
+
+            // 乐观上屏：先占位，显示"上传中"
+            var temp = {
+                id: 'tmp-att-' + Date.now(),
+                from: Store.me.login,
+                avatar: Store.me.avatar_url,
+                text: '正在上传 ' + file.name + '…',
+                raw: '',
+                ts: Date.now(),
+                pending: true
+            };
+            this._pending.push(temp);
+            this._rerenderWithPending();
+
+            try {
+                var att = await Attach.upload(c.owner, c.name, file, function (stage) {
+                    if (stage === 'uploading') {
+                        temp.text = '正在上传 ' + file.name + '…';
+                        self._rerenderWithPending();
+                    }
+                });
+
+                // 上传完：把占位换成真实附件气泡（本地 dataUrl，秒开）
+                temp.text = Attach.encode(att);
+                temp.raw = temp.text;
+                // 字段统一成信封格式（n/t/s/p），渲染时不用再判断来源
+                temp.att = {
+                    n: att.name, t: att.type, s: att.size,
+                    p: att.path, dataUrl: att.dataUrl
+                };
+
+                // 发消息（走正常加密流程）
+                if (c.type === 'dm') {
+                    var e2e = this.e2eState || {};
+                    await Chat.send(c.owner, c.name, temp.text, {
+                        myLogin: Store.me.login,
+                        peerPub: e2e.peerPub
+                    });
+                } else {
+                    await Group.send(c.owner, c.name, temp.text);
+                }
+
+                this._removePending(temp.id);
+                API.clearMessageCache(c.owner, c.name);
+
+                var msgs = await this._reloadCurrent();
+                // 服务器可能还没同步到这条，继续显示本地气泡
+                if (!this._containsText(msgs, temp.text)) {
+                    temp.pending = false;
+                    this._pending.push(temp);
+                }
+                this._rerenderWithPending(msgs);
+                this.loadConvs();
+            } catch (e) {
+                temp.pending = false;
+                temp.failed = true;
+                temp.error = e.message;
+                temp.text = file.name + '（发送失败）';
+                this._rerenderWithPending();
+                this.toast('附件发送失败：' + (e.message || e), true);
+                if (global.console) console.error('[附件]', e);
+            }
+        },
+
+        /** 重新拉当前会话消息（单聊/群聊分流） */
+        async _reloadCurrent() {
+            var c = this.current;
+            if (!c) return [];
+            if (c.type === 'dm') {
+                var e2e = this.e2eState || {};
+                return await Chat.messages(c.owner, c.name, true, {
+                    myLogin: Store.me.login,
+                    peerPub: e2e.peerPub
+                });
+            }
+            return await Group.messages(c.owner, c.name, true);
+        },
+
+        _removePending: function (id) {
+            this._pending = this._pending.filter(function (p) {
+                return p.id !== id;
+            });
+        },
+
+        /** 服务器列表里是否已有这条（按内容+发送者比对） */
+        _containsText: function (msgs, text) {
+            if (!msgs) return false;
+            var me = Store.me.login.toLowerCase();
+            for (var i = msgs.length - 1; i >= 0 && i >= msgs.length - 8; i--) {
+                var m = msgs[i];
+                if (String(m.from).toLowerCase() !== me) continue;
+                // 服务端返回的是密文，比 raw；明文则比 text
+                if (m.raw === text || m.text === text) return true;
+            }
+            return false;
+        },
+
+        /** 用「服务器列表 + 未确认气泡」重绘 */
+        _rerenderWithPending: function (msgs) {
+            if (msgs) this._currentMsgs = msgs;
+            var all = (this._currentMsgs || []).concat(this._pending);
+            this.renderMessages(all, true);
         },
 
         async deleteMessage(id) {
