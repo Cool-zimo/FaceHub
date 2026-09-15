@@ -155,10 +155,19 @@
          *        （刚写完就读时用，因为 raw CDN 有缓存延迟）
          *        false（默认）走 raw CDN，免费
          */
-        async readFile(owner, repo, path, branch, fresh) {
+        /**
+         * 读文件
+         *
+         * @param {boolean} asBase64 传 true 时返回**原始 base64**，不做 UTF-8 解码。
+         *   二进制文件（图片/音视频）必须走这条 —— 走 UTF-8 解码会被
+         *   替换成 U+FFFD，数据永久损坏，图片直接打不开。
+         *   缓存也分开存，避免两种形式互相污染。
+         */
+        async readFile(owner, repo, path, branch, fresh, asBase64) {
             branch = branch || 'main';
-            var ck = 'fh:c:' + owner + '/' + repo + '/' + path;   // 内容缓存
-            var ek = 'fh:e:' + owner + '/' + repo + '/' + path;   // ETag
+            var suffix = asBase64 ? '|b64' : '';
+            var ck = 'fh:c:' + owner + '/' + repo + '/' + path + suffix;
+            var ek = 'fh:e:' + owner + '/' + repo + '/' + path;   // ETag 共用
 
             var cached = this._ls(ck);
             var etag = this._ls(ek);
@@ -182,11 +191,20 @@
                 throw new Error('服务器返回 304 但本地没有缓存');
             }
 
-            var text = this._decodeContent(r.data);
+            var out = asBase64
+                ? this._rawBase64(r.data)
+                : this._decodeContent(r.data);
             var newEtag = r.__headers.get('etag');
             if (newEtag) this._ls(ek, newEtag);
-            this._ls(ck, text);
-            return text;
+            this._ls(ck, out);
+            return out;
+        },
+
+        /** 取 base64 原文（去换行），不做任何字符解码 */
+        _rawBase64(data) {
+            if (!data) return '';
+            if (data.encoding !== 'base64') return data.content || '';
+            return (data.content || '').replace(/\s/g, '');
         },
 
         /** contents API 返回 base64，需按 UTF-8 解码（中文安全） */
@@ -215,13 +233,26 @@
          * 写文件。已有文件时必须先取 sha，否则 422。
          * @param {string|null} sha - 已存在则传 sha，新文件传 null
          */
-        async writeFile(owner, repo, path, content, message, sha, branch) {
-            var bytes = new TextEncoder().encode(content);
-            var bin = '';
-            for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        /**
+         * 写文件
+         *
+         * @param {boolean} isBase64 传 true 时 content 视为**已编码**的 base64。
+         *   附件必须走这条路：二进制用 TextEncoder 再 btoa 会先被 UTF-8
+         *   重编码一遍，图片直接损坏。
+         */
+        async writeFile(owner, repo, path, content, message, sha, branch, isBase64) {
+            var encoded;
+            if (isBase64) {
+                encoded = content;
+            } else {
+                var bytes = new TextEncoder().encode(content);
+                var bin = '';
+                for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+                encoded = btoa(bin);
+            }
             var body = {
                 message: message,
-                content: btoa(bin),
+                content: encoded,
                 branch: branch || 'main'
             };
             if (sha) body.sha = sha;
