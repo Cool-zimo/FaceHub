@@ -936,10 +936,13 @@
                 }
 
                 // 附件：本地刚上传的用 m.att（含 dataUrl，秒开），
-                // 服务器来的用信封解析。pending 也要解析，
-                // 否则会露出 FHATT1:{...} 这种原始串。
+                // 服务器来的用信封解析。
+                //
+                // ★ 不能拿 locked 当条件：明文发送的附件消息也可能
+                // 被标成 locked，结果不解析 → 界面直接露出
+                // FHATT1:{...} 内部协议串（"漏源码"）。
                 var att = null;
-                if (global.Attach && !m.locked) {
+                if (global.Attach) {
                     att = m.att || Attach.parse(m.text);
                 }
 
@@ -957,6 +960,10 @@
                 if (att) {
                     // 附件消息：渲染媒体预览而不是文本
                     Attach.render(b, att, { owner: self.current.owner, repo: self.current.name });
+                } else if (global.Attach && Attach.looksLikeAttachment(m.text)) {
+                    // 是附件串但解析不出来 —— 也绝不把原始串甩给用户
+                    b.textContent = '⚠️ 附件（格式无法识别）';
+                    b.title = '这条是附件消息，但内容解析失败';
                 } else {
                     b.textContent = m.text;
                 }
