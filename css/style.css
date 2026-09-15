@@ -525,3 +525,82 @@ input, textarea { font-family: inherit; }
     background: #FA5151; border-radius: 50%;
     position: absolute; top: 50%; right: 8px; margin-top: -4px;
 }
+
+/* ═══ 附件 ═══════════════════════════════════════════════ */
+.attach-btn {
+    width: 32px; height: 32px; margin-right: 6px;
+    font-size: 20px; line-height: 1;
+    border: 0; border-radius: 4px; background: transparent;
+    color: #7a7a7a; flex-shrink: 0;
+}
+.attach-btn:hover { background: #e5e5e5; color: var(--wx-green); }
+
+.bubble-att { padding: 3px; }
+
+.att { max-width: 260px; }
+
+.att-img {
+    max-width: 100%; max-height: 240px; display: block;
+    border-radius: 4px; cursor: zoom-in;
+}
+
+.att-media {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; min-width: 150px;
+    background: #fff; border-radius: 4px; cursor: pointer;
+}
+.att-play {
+    width: 30px; height: 30px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--wx-green); color: #fff;
+    border-radius: 50%; font-size: 14px;
+}
+.att-info { min-width: 0; }
+.att-name {
+    font-size: 13px; color: #111;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.att-sub { font-size: 11px; color: #9a9a9a; margin-top: 2px; }
+
+.att-file {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; min-width: 150px;
+    background: #fff; border-radius: 4px; cursor: pointer;
+}
+.att-file:hover { background: #f7f7f7; }
+.att-icon { font-size: 22px; flex-shrink: 0; }
+.att-file .att-name { flex: 1; }
+
+.att-player { max-width: 260px; height: 34px; display: block; }
+video.att-player { height: auto; max-height: 260px; }
+
+/* 全屏预览 */
+.att-overlay {
+    position: fixed; inset: 0; z-index: 9000;
+    background: rgba(0, 0, 0, .9);
+    display: flex; align-items: center; justify-content: center;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.att-ov-box { position: relative; max-width: 92vw; max-height: 88vh; }
+.att-ov-box img { max-width: 92vw; max-height: 78vh; display: block; }
+.att-ov-box video { max-width: 92vw; max-height: 78vh; }
+.att-ov-close {
+    position: absolute; top: -36px; right: 0;
+    width: 30px; height: 30px; border: 0; border-radius: 50%;
+    background: rgba(255, 255, 255, .2); color: #fff; font-size: 15px;
+}
+.att-ov-bar {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 10px; color: #fff; font-size: 12.5px;
+}
+.att-ov-bar span {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.att-ov-bar button {
+    padding: 5px 11px; border: 0; border-radius: 4px;
+    background: var(--wx-green); color: #fff; font-size: 12.5px;
+    flex-shrink: 0;
+}
+.att-ov-bar button:disabled { opacity: .6; }
+.att-ov-err { color: #fff; font-size: 14px; }
