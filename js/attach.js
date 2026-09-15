@@ -184,14 +184,29 @@ var Attach = {
 
     /** 解析附件消息；不是附件返回 null */
     parse(text) {
-        if (!text || text.indexOf(this.PREFIX) !== 0) return null;
+        if (!text) return null;
+        // trim：GitHub 返回的内容前后可能带空白/换行，
+        // 不 trim 会导致 indexOf !== 0 而漏判 → 界面露出裸协议串
+        var t = String(text).trim();
+        if (t.indexOf(this.PREFIX) !== 0) return null;
         try {
-            var d = JSON.parse(text.slice(this.PREFIX.length));
+            var d = JSON.parse(t.slice(this.PREFIX.length));
             if (!d || !d.p) return null;
             return d;
         } catch (e) {
             return null;
         }
+    },
+
+    /**
+     * 看起来像附件串吗？（哪怕解析失败）
+     *
+     * 作用：兜底防护。解析失败时也不要把 FHATT1:{...} 这种内部
+     * 协议串直接甩给用户 —— 那是"漏源码"，看着像坏了。
+     */
+    looksLikeAttachment(text) {
+        if (!text) return false;
+        return String(text).trim().indexOf(this.PREFIX) === 0;
     },
 
     kind(att) {
