@@ -604,3 +604,21 @@ video.att-player { height: auto; max-height: 260px; }
 }
 .att-ov-bar button:disabled { opacity: .6; }
 .att-ov-err { color: #fff; font-size: 14px; }
+
+/* 邀请条：接受 / 忽略 / 全部忽略 */
+.invite-tools { display: flex; gap: 8px; align-items: center; }
+.invite-tools button {
+    padding: 2px 8px; font-size: 11.5px; border: 0;
+    border-radius: 3px; background: transparent; color: #576b95;
+}
+.invite-tools button:hover { background: #ebebeb; }
+.invite-decline-all { color: #d93025 !important; }
+
+.invite-acts { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.invite-ignore {
+    padding: 4px 10px; font-size: 12.5px;
+    border: 1px solid #d5d5d5; border-radius: 3px;
+    background: #fff; color: #7a7a7a;
+}
+.invite-ignore:hover { background: #f2f2f2; color: #d93025; }
+.invite-ignore:disabled { opacity: .5; }
