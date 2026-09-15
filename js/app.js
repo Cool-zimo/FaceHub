@@ -442,12 +442,27 @@
             title.className = 'invite-title';
             var t1 = document.createElement('span');
             t1.textContent = '🔔 ' + this.invites.length + ' 个会话邀请';
+
+            var tools = document.createElement('span');
+            tools.className = 'invite-tools';
+
             var rf = document.createElement('button');
             rf.className = 'invite-refresh';
             rf.textContent = '刷新';
             rf.onclick = function () { self.loadConvs(); };
+            tools.appendChild(rf);
+
+            // 邀请多的时候（测试会刷出一堆）逐个点太痛苦
+            if (this.invites.length > 1) {
+                var da = document.createElement('button');
+                da.className = 'invite-decline-all';
+                da.textContent = '全部忽略';
+                da.onclick = function () { self.declineAllInvites(da); };
+                tools.appendChild(da);
+            }
+
             title.appendChild(t1);
-            title.appendChild(rf);
+            title.appendChild(tools);
             box.appendChild(title);
 
             this.invites.forEach(function (inv) {
@@ -459,12 +474,24 @@
                 who.textContent = inv.peer + (inv.isGroup ? ' 邀请你加入群聊' : ' 想和你私聊');
                 row.appendChild(who);
 
+                var acts = document.createElement('span');
+                acts.className = 'invite-acts';
+
                 var btn = document.createElement('button');
                 btn.className = 'invite-accept';
                 btn.textContent = '接受';
                 btn.onclick = function () { self.acceptInvite(inv, btn); };
-                row.appendChild(btn);
+                acts.appendChild(btn);
 
+                // 忽略：GitHub 有 DELETE 端点，之前只做了接受没做忽略，
+                // 结果不想要的邀请永远清不掉
+                var ig = document.createElement('button');
+                ig.className = 'invite-ignore';
+                ig.textContent = '忽略';
+                ig.onclick = function () { self.declineInvite(inv, ig); };
+                acts.appendChild(ig);
+
+                row.appendChild(acts);
                 box.appendChild(row);
             });
 
@@ -472,6 +499,52 @@
             tip.className = 'invite-delay';
             tip.textContent = 'GitHub 的邀请有几分钟延迟，没看到就点刷新';
             box.appendChild(tip);
+        },
+
+        /** 忽略单条邀请 */
+        async declineInvite(inv, btn) {
+            if (btn) { btn.disabled = true; btn.textContent = '…'; }
+            try {
+                await API.declineInvitation(inv.id);
+                this.invites = (this.invites || []).filter(function (i) {
+                    return i.id !== inv.id;
+                });
+                this.renderInvites();
+                this.renderConvs();
+            } catch (e) {
+                this.toast('忽略失败：' + (e.message || e), true);
+                if (btn) { btn.disabled = false; btn.textContent = '忽略'; }
+            }
+        },
+
+        /**
+         * 全部忽略
+         *
+         * 逐个发 DELETE（GitHub 没有批量端点）。并发跑会撞限流，
+         * 所以串行；失败的不中断，最后汇报成功/失败数。
+         */
+        async declineAllInvites(btn) {
+            var list = (this.invites || []).slice();
+            if (!list.length) return;
+            if (!global.confirm('忽略全部 ' + list.length + ' 个邀请？\n\n' +
+                '这些都是别人发给你的会话邀请，忽略后就看不到了。')) return;
+
+            if (btn) { btn.disabled = true; btn.textContent = '忽略中…'; }
+            var done = 0, failed = 0;
+
+            for (var i = 0; i < list.length; i++) {
+                try {
+                    await API.declineInvitation(list[i].id);
+                    done++;
+                } catch (e) {
+                    failed++;
+                }
+                if (btn) btn.textContent = '忽略中 ' + (done + failed) + '/' + list.length;
+            }
+
+            this.toast('已忽略 ' + done + ' 个' + (failed ? '，' + failed + ' 个失败' : ''),
+                failed > 0);
+            await this.loadConvs();
         },
 
         /**
