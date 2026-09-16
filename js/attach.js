@@ -343,6 +343,13 @@ var Attach = {
 
         // 刚发的本地消息有 dataUrl，直接用，不用等回读
         if (kind === 'image') {
+            // GIF 不压缩（见 compressImage），所以直接 <img> 就会动，
+            // 不需要任何额外处理 —— 千万别走 canvas，一动图就变静止。
+            var isGif = /gif/i.test(att.t || '') || /\.gif$/i.test(att.n || '');
+
+            var wrap = document.createElement('div');
+            wrap.className = 'att-img-wrap';
+
             var img = document.createElement('img');
             img.className = 'att-img';
             img.alt = att.n || '';
@@ -355,13 +362,22 @@ var Attach = {
                 img.onload = function () { img.classList.remove('skeleton'); };
                 this._lazyLoad(img, att, ctx);
             }
-            img.onclick = function () { self.preview(att, ctx); };
-            el.appendChild(img);
+            wrap.appendChild(img);
+            wrap.onclick = function () { self.preview(att, ctx); };
+
+            if (isGif) {
+                var gb = document.createElement('span');
+                gb.className = 'att-gif-badge';
+                gb.textContent = 'GIF';
+                wrap.appendChild(gb);
+            }
+            el.appendChild(wrap);
             actions = self._actionBar(att, ctx);
             el.appendChild(actions);
             box.appendChild(el);
             return el;
         }
+            img.onclick = function () { self.preview(att, ctx); };
 
         if (kind === 'video' || kind === 'audio') {
             var cover = document.createElement('div');
