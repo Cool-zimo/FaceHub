@@ -217,17 +217,20 @@ var Attach = {
         return 'file';
     },
 
+    /**
+     * 文件图标
+     *
+     * 有 Icons 就用 SVG（单色，跟界面一致），没有就退回 emoji。
+     * 返回值直接进 innerHTML，所以只可能是这两种来源，不含用户输入。
+     */
     icon(att) {
+        if (global.Icons && Icons.forType) {
+            return Icons.forType(this.kind(att), att.n || att.name, 18);
+        }
         var k = this.kind(att);
         if (k === 'image') return '🖼️';
         if (k === 'video') return '🎬';
         if (k === 'audio') return '🎵';
-        var n = (att.n || '').toLowerCase();
-        if (/\.(zip|rar|7z|tar|gz)$/.test(n)) return '🗜️';
-        if (/\.(pdf)$/.test(n)) return '📕';
-        if (/\.(doc|docx)$/.test(n)) return '📘';
-        if (/\.(xls|xlsx|csv)$/.test(n)) return '📗';
-        if (/\.(txt|md|json|log)$/.test(n)) return '📄';
         return '📎';
     },
 
@@ -346,7 +349,10 @@ var Attach = {
             if (att.dataUrl) {
                 img.src = att.dataUrl;
             } else {
-                img.dataset.src = '1';
+                // 先占位骨架，图片到位后淡入 —— 避免布局跳动
+                img.classList.add('skeleton');
+                var self0 = this;
+                img.onload = function () { img.classList.remove('skeleton'); };
                 this._lazyLoad(img, att, ctx);
             }
             img.onclick = function () { self.preview(att, ctx); };
@@ -360,8 +366,10 @@ var Attach = {
         if (kind === 'video' || kind === 'audio') {
             var cover = document.createElement('div');
             cover.className = 'att-media';
-            cover.innerHTML = '<span class="att-play">' +
-                (kind === 'video' ? '▶' : '♪') + '</span>';
+            var playIco = (global.Icons)
+                ? (kind === 'video' ? Icons.play(16) : Icons.music(16))
+                : (kind === 'video' ? '▶' : '♪');
+            cover.innerHTML = '<span class="att-play">' + playIco + '</span>';
             var info = document.createElement('div');
             info.className = 'att-info';
             info.innerHTML = '<div class="att-name"></div>' +
@@ -386,7 +394,7 @@ var Attach = {
         card.className = 'att-file';
         var ic = document.createElement('span');
         ic.className = 'att-icon';
-        ic.textContent = this.icon(att);
+        ic.innerHTML = this.icon(att);
         var nm = document.createElement('span');
         nm.className = 'att-name';
         nm.textContent = att.n || '文件';
@@ -553,7 +561,10 @@ var Attach = {
     async doSave(att, ctx, btn, stayHere) {
         var full = Object.assign({}, att, { owner: ctx.owner, repo: ctx.repo });
         var label = '转存到 Drive';
-        if (btn) { btn.disabled = true; btn.textContent = '转存中…'; }
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="act-spinner"></i>转存中…';
+        }
         try {
             var r = await this.saveToDrive(full);
             if (!r.ok) {
@@ -564,7 +575,7 @@ var Attach = {
                 return;
             }
             if (global.App) App.toast('已转存到 Drive：' + r.path);
-            if (btn) btn.textContent = '已存 ✓';
+            if (btn) btn.innerHTML = (global.Icons ? Icons.check(12) : '') + '已存 ✓';
 
             // 气泡模式：留在聊天里，但给个可点的跳转入口
             if (stayHere) {
