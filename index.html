@@ -38,16 +38,16 @@
   <nav class="nav-rail">
     <img id="me-avatar" class="nav-avatar" alt="我">
     <button class="nav-btn active" data-tab="chats" title="聊天">
-      <span class="nav-ico">💬</span><span class="nav-txt">聊天</span>
+      <span class="nav-ico" data-ico="chat"></span><span class="nav-txt">聊天</span>
       <i id="badge-chat" class="nav-badge" style="display:none"></i>
     </button>
     <button class="nav-btn" data-tab="contacts" title="通讯录">
-      <span class="nav-ico">👥</span><span class="nav-txt">通讯录</span>
+      <span class="nav-ico" data-ico="contacts"></span><span class="nav-txt">通讯录</span>
       <i id="badge-invite" class="nav-badge" style="display:none"></i>
     </button>
     <div class="nav-spacer"></div>
     <button class="nav-btn" data-tab="me" title="我">
-      <span class="nav-ico">⚙️</span><span class="nav-txt">我</span>
+      <span class="nav-ico" data-ico="me"></span><span class="nav-txt">我</span>
     </button>
   </nav>
 
@@ -58,7 +58,7 @@
         <span class="search-ico">🔍</span>
         <input id="search-input" class="search-input" placeholder="搜索">
       </div>
-      <button id="add-btn" class="add-btn" title="发起会话">＋</button>
+      <button id="add-btn" class="add-btn" title="发起会话" data-ico="plus"></button>
     </header>
     <div id="invite-banner" class="invite-banner" style="display:none"></div>
     <div id="conv-list" class="conv-list"></div>
@@ -67,12 +67,12 @@
   <!-- 聊天区 -->
   <main class="chat-pane" id="chat-pane">
     <header class="chat-head" id="chat-head" style="display:none">
-      <button id="back-btn" class="back-btn" title="返回">‹</button>
+      <button id="back-btn" class="back-btn" title="返回" data-ico="back"></button>
       <div class="chat-head-txt">
         <div id="chat-title" class="chat-title"></div>
         <div id="chat-sub" class="chat-sub"></div>
       </div>
-      <button id="info-btn" class="info-btn" title="详情">⋯</button>
+      <button id="info-btn" class="info-btn" title="详情" data-ico="more"></button>
     </header>
 
     <div id="messages" class="messages">
@@ -85,7 +85,7 @@
     <div id="e2e-bar" class="e2e-bar" style="display:none"></div>
 
     <div class="composer" id="composer" style="display:none">
-      <button id="attach-btn" class="attach-btn" title="发送附件（图片/视频/音频/文件）">＋</button>
+      <button id="attach-btn" class="attach-btn" title="发送附件（图片/视频/音频/文件）" data-ico="clip"></button>
       <input id="msg-input" class="msg-input" placeholder="发消息…" maxlength="2000" autocomplete="off">
       <button id="send-btn" class="send-btn">发送</button>
     </div>
@@ -165,6 +165,7 @@
 <script src="js/chat.js"></script>
 <script src="js/group.js"></script>
 <script src="js/attach.js"></script>
+<script src="js/icons.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
