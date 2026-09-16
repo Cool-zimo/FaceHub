@@ -285,6 +285,9 @@
                 self.sendAttachment();
             };
 
+            // 图标：把 data-ico 占位渲染成内联 SVG
+            self.mountIcons();
+
             // 返回（移动端）
             document.getElementById('back-btn').onclick = function () {
                 document.getElementById('app').classList.remove('show-chat');
@@ -741,6 +744,7 @@
             this.current = c;
             this.e2eState = null;
             this._lastSig = null;        // 换会话，指纹必须重置
+            this._seenIds = {};          // 已见 id 也重置，重开会话重新播一遍
             this.markSeen(c, Date.now());
             document.getElementById('app').classList.add('show-chat');
 
@@ -897,7 +901,14 @@
         },
 
         // ── 消息渲染 ───────────────────────────────────────────
-        renderMessages(msgs) {
+        /**
+         * 渲染消息
+         *
+         * @param {boolean} animateNew 只给"没见过的消息"播进场动画。
+         *   整体重绘时若全部重放，每次轮询都会抖一下 —— 很吵。
+         *   所以记录已显示过的 id，只让新来的那几条动。
+         */
+        renderMessages(msgs, animateNew) {
             var box = document.getElementById('messages');
             var myLogin = Store.me.login;
             var self = this;
@@ -905,6 +916,9 @@
             // 记住滚动位置：正在翻历史的人不该被轮询拽回底部
             var wasAtBottom = (box.scrollHeight - box.scrollTop - box.clientHeight) < 80;
             var keepTop = box.scrollTop;
+
+            if (!this._seenIds) this._seenIds = {};
+            var seen = this._seenIds;
 
             box.innerHTML = '';
             if (!msgs.length) {
@@ -915,7 +929,10 @@
             msgs.forEach(function (m) {
                 var mine = String(m.from).toLowerCase() === myLogin.toLowerCase();
                 var row = document.createElement('div');
-                row.className = 'msg-row' + (mine ? ' mine' : '');
+                var isNew = animateNew && m.id && !seen[m.id];
+                if (m.id) seen[m.id] = 1;
+                row.className = 'msg-row' + (mine ? ' mine' : '') +
+                    (isNew ? ' is-new' : '');
 
                 var img = document.createElement('img');
                 img.className = 'msg-avatar';
@@ -1074,6 +1091,7 @@
 
                 // ② 发送成功：撤掉本地气泡，换成服务器上的真实数据
                 this._removePending(temp.id);
+                self._flashSent();
 
                 // 发过的消息 ETag 一定变了，强制重拉一次避免拿到旧缓存
                 API.clearMessageCache(c.owner, c.name);
@@ -1175,6 +1193,7 @@
                 }
 
                 this._removePending(temp.id);
+                self._flashSent();
                 API.clearMessageCache(c.owner, c.name);
 
                 var msgs = await this._reloadCurrent();
@@ -1804,6 +1823,21 @@
             }
         },
 
+        /**
+         * 发送成功的按钮反馈
+         *
+         * 移除 class 后必须强制 reflow 才能重新触发动画 ——
+         * 否则连续发两条，第二次不会播。
+         */
+        _flashSent: function () {
+            var btn = document.getElementById('send-btn');
+            if (!btn) return;
+            btn.classList.remove('just-sent');
+            void btn.offsetWidth;      // 强制 reflow
+            btn.classList.add('just-sent');
+            setTimeout(function () { btn.classList.remove('just-sent'); }, 400);
+        },
+
         /** 消息指纹：只有条数和最后一条变了才重绘 */
         _signature: function (msgs) {
             if (!msgs || !msgs.length) return '0';
@@ -1827,6 +1861,29 @@
             if (!seen) return false;                // 从没打开过不算未读
             var t = c.updatedAt ? new Date(c.updatedAt).getTime() : 0;
             return t > seen;
+        },
+
+        /**
+         * 渲染 data-ico 占位为 SVG
+         *
+         * 图标尺寸按元素类型给默认值，也可以在 data-size 覆盖。
+         * 用 innerHTML 注入的是我们自己生成的静态 SVG（不含外部输入），
+         * 没有 XSS 风险。
+         */
+        mountIcons(root) {
+            if (!global.Icons) return;
+            var scope = root || document;
+            Array.prototype.forEach.call(
+                scope.querySelectorAll('[data-ico]'),
+                function (el) {
+                    var name = el.getAttribute('data-ico');
+                    var fn = Icons[name];
+                    if (!fn) return;
+                    var size = parseInt(el.getAttribute('data-size'), 10) ||
+                        (el.classList.contains('nav-ico') ? 22 : 20);
+                    el.innerHTML = fn(size);
+                }
+            );
         },
 
         // ── 工具 ───────────────────────────────────────────────
