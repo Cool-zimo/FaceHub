@@ -270,17 +270,36 @@ var Attach = {
         var repo = await this.findDriveRepo(me);
         if (!repo) return { ok: false, reason: 'no-drive' };
 
-        var b64 = (att.dataUrl && att.dataUrl.split(',')[1]) ||
-            await global.API.readFile(att.owner, att.repo, att.path, 'main', false, true);
+        // ★ 信封格式里路径字段是 p，不是 path。
+        // 写死 att.path 会让"收到的附件"转存时拿到 undefined → 404。
+        var rel = att.p || att.path;
+        if (!rel) throw new Error('附件缺少路径信息');
 
-        // 保留日期前缀，避免同名覆盖
-        var safe = this._safeName(att.n || att.name || 'file');
-        var path = safe;
+        var b64 = null;
+        if (att.dataUrl) {
+            b64 = att.dataUrl.split(',')[1] || null;
+        }
+        if (!b64) {
+            b64 = await global.API.readFile(att.owner, att.repo, rel, 'main', false, true);
+        }
+        if (!b64) throw new Error('附件内容为空');
 
-        await global.API.writeFile(me, repo, path, b64,
-            '从 FaceHub 转存：' + safe, null, 'main', true);
+        // 加时间戳前缀，避免同名覆盖（同一个文件转存两次不该丢）
+        var safe = this._stampName(this._safeName(att.n || att.name || 'file'));
 
-        return { ok: true, repo: repo, path: path };
+        await global.API.writeFile(me, repo, safe, b64,
+            '从 FaceHub 转存：' + (att.n || safe), null, 'main', true);
+
+        return { ok: true, repo: repo, path: safe };
+    },
+
+    /** 给文件名加日期前缀，避免同名覆盖 */
+    _stampName(name) {
+        var d = new Date();
+        var p = function (n) { return String(n).padStart(2, '0'); };
+        return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) +
+            '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) +
+            '-' + name;
     },
 
     _safeName(name) {
@@ -314,6 +333,11 @@ var Attach = {
         var el = document.createElement('div');
         el.className = 'att att-' + kind;
 
+        // 每个附件气泡都挂一条操作栏：转存 / 下载
+        // 之前只有点开全屏预览才有转存按钮，收到附件想存还得先点开，
+        // 多两步；现在直接点就行。
+        var actions = null;
+
         // 刚发的本地消息有 dataUrl，直接用，不用等回读
         if (kind === 'image') {
             var img = document.createElement('img');
@@ -327,6 +351,8 @@ var Attach = {
             }
             img.onclick = function () { self.preview(att, ctx); };
             el.appendChild(img);
+            actions = self._actionBar(att, ctx);
+            el.appendChild(actions);
             box.appendChild(el);
             return el;
         }
@@ -349,6 +375,8 @@ var Attach = {
                 self.playMedia(el, att, ctx, cover);
             };
             el.appendChild(cover);
+            actions = self._actionBar(att, ctx);
+            el.appendChild(actions);
             box.appendChild(el);
             return el;
         }
@@ -370,8 +398,42 @@ var Attach = {
         card.appendChild(sz);
         card.onclick = function () { self.download(att, ctx); };
         el.appendChild(card);
+        actions = self._actionBar(att, ctx);
+        el.appendChild(actions);
         box.appendChild(el);
         return el;
+    },
+
+    /**
+     * 附件操作栏：转存到 Drive / 下载
+     *
+     * 转存是异步的且要读一次仓库，所以按钮要显示进度；
+     * 完成后变成"已存 ✓"并禁用，避免手抖点两次存出两份。
+     */
+    _actionBar(att, ctx) {
+        var self = this;
+        var bar = document.createElement('div');
+        bar.className = 'att-actions';
+
+        var save = document.createElement('button');
+        save.className = 'att-act';
+        save.textContent = '转存到 Drive';
+        save.onclick = function (e) {
+            e.stopPropagation();
+            self.doSave(att, ctx, save, true);
+        };
+        bar.appendChild(save);
+
+        var dl = document.createElement('button');
+        dl.className = 'att-act';
+        dl.textContent = '下载';
+        dl.onclick = function (e) {
+            e.stopPropagation();
+            self.download(att, ctx);
+        };
+        bar.appendChild(dl);
+
+        return bar;
     },
 
     _lazyLoad(img, att, ctx) {
@@ -481,32 +543,50 @@ var Attach = {
     },
 
     /** 转存按钮的实际动作（供气泡和预览共用） */
-    async doSave(att, ctx, btn) {
+    /**
+     * 转存按钮的实际动作（气泡和预览共用）
+     *
+     * @param {boolean} stayHere true = 不跳转。
+     *   气泡上转存时聊天不该被打断，只提示；
+     *   全屏预览里转存则顺带跳过去看结果。
+     */
+    async doSave(att, ctx, btn, stayHere) {
         var full = Object.assign({}, att, { owner: ctx.owner, repo: ctx.repo });
+        var label = '转存到 Drive';
         if (btn) { btn.disabled = true; btn.textContent = '转存中…'; }
         try {
             var r = await this.saveToDrive(full);
             if (!r.ok) {
-                if (r.reason === 'no-drive') {
-                    if (global.App) {
-                        App.toast('没找到 Drive 存储仓库，请先去 GitHub Drive 创建', true);
-                    }
+                if (r.reason === 'no-drive' && global.App) {
+                    App.toast('没找到 Drive 存储仓库，请先去 GitHub Drive 创建', true);
                 }
-                if (btn) { btn.disabled = false; btn.textContent = '转存到 Drive'; }
+                if (btn) { btn.disabled = false; btn.textContent = label; }
                 return;
             }
             if (global.App) App.toast('已转存到 Drive：' + r.path);
-            if (btn) btn.textContent = '已转存 ✓';
+            if (btn) btn.textContent = '已存 ✓';
 
-            // 有桥接就顺带跳过去
+            // 气泡模式：留在聊天里，但给个可点的跳转入口
+            if (stayHere) {
+                if (btn && global.Bridge && Bridge.go) {
+                    btn.textContent = '去 Drive 看看';
+                    btn.disabled = false;
+                    btn.onclick = function (e) {
+                        e.stopPropagation();
+                        try { Bridge.go({ from: 'facehub', focus: r.path }); }
+                        catch (err) { /* 忽略 */ }
+                    };
+                }
+                return;
+            }
+
             if (global.Bridge && Bridge.go) {
-                try {
-                    Bridge.go({ from: 'facehub', focus: r.path });
-                } catch (e) { /* 跳转失败不影响已转存 */ }
+                try { Bridge.go({ from: 'facehub', focus: r.path }); }
+                catch (e) { /* 跳转失败不影响已转存 */ }
             }
         } catch (e) {
             if (global.App) App.toast('转存失败：' + (e.message || e), true);
-            if (btn) { btn.disabled = false; btn.textContent = '转存到 Drive'; }
+            if (btn) { btn.disabled = false; btn.textContent = label; }
         }
     }
 };
