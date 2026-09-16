@@ -41,6 +41,9 @@
       <span class="nav-ico" data-ico="chat"></span><span class="nav-txt">聊天</span>
       <i id="badge-chat" class="nav-badge" style="display:none"></i>
     </button>
+    <button class="nav-btn" data-tab="moments" title="朋友圈">
+      <span class="nav-ico" data-ico="moments"></span><span class="nav-txt">朋友圈</span>
+    </button>
     <button class="nav-btn" data-tab="contacts" title="通讯录">
       <span class="nav-ico" data-ico="contacts"></span><span class="nav-txt">通讯录</span>
       <i id="badge-invite" class="nav-badge" style="display:none"></i>
@@ -90,6 +93,17 @@
       <button id="send-btn" class="send-btn">发送</button>
     </div>
   </main>
+
+  <!-- ═══ 朋友圈 ═══ -->
+  <section id="moments-pane" class="pane moments-pane" style="display:none">
+    <header class="moments-head">
+      <button id="moments-back" class="back-btn" title="返回" data-ico="back"></button>
+      <span class="moments-title">朋友圈</span>
+      <button id="moments-post" class="btn-primary btn-sm" title="发表">发表</button>
+    </header>
+    <div id="moments-list" class="moments-list"></div>
+    <div id="moments-more" class="moments-more" style="display:none">加载更多</div>
+  </section>
 </div>
 
 <!-- ═══ 新建会话 ═══════════════════════════════════════════ -->
@@ -165,6 +179,7 @@
 <script src="js/chat.js"></script>
 <script src="js/group.js"></script>
 <script src="js/attach.js"></script>
+<script src="js/moments.js"></script>
 <script src="js/icons.js"></script>
 <script src="js/app.js"></script>
 </body>
