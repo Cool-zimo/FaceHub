@@ -285,6 +285,23 @@
                 self.sendAttachment();
             };
 
+            // 朋友圈
+            document.getElementById('moments-post').onclick = function () {
+                self.postMoment();
+            };
+            document.getElementById('moments-back').onclick = function () {
+                self.hideMoments();
+            };
+            Array.prototype.forEach.call(
+                document.querySelectorAll('.nav-btn[data-tab="moments"]'),
+                function (b) { b.onclick = function () { self.showMoments(); }; }
+            );
+            var mm = document.getElementById('moments-more');
+            if (mm) mm.onclick = function () {
+                self._momentsPage++;
+                self.loadMoments(true);
+            };
+
             // 图标：把 data-ico 占位渲染成内联 SVG
             self.mountIcons();
 
@@ -1884,6 +1901,357 @@
                     el.innerHTML = fn(size);
                 }
             );
+        },
+
+        // ══════════════════════════════════════════════════════
+        //  朋友圈
+        // ══════════════════════════════════════════════════════
+
+        _momentsPage: 1,
+
+        async showMoments() {
+            var mp = document.getElementById('moments-pane');
+            var app = document.getElementById('app');
+            if (mp) mp.style.display = '';
+            if (app) app.style.display = 'none';
+            this._momentsPage = 1;
+            this.mountIcons();
+            await this.loadMoments();
+        },
+
+        hideMoments() {
+            var mp = document.getElementById('moments-pane');
+            var app = document.getElementById('app');
+            if (mp) mp.style.display = 'none';
+            if (app) app.style.display = '';
+        },
+
+        async loadMoments(append) {
+            var list = document.getElementById('moments-list');
+            if (!list) return;
+            var self = this;
+
+            if (!append) {
+                list.innerHTML = '<div class="moments-loading">加载中…</div>';
+            }
+
+            try {
+                var posts = await Moments.timeline(
+                    Store.me.login, Moments.PAGE * this._momentsPage);
+
+                if (!append) list.innerHTML = '';
+                if (!posts.length && !append) {
+                    list.innerHTML = '<div class="moments-empty">' +
+                        '<p>还没有动态</p><p class="sub">点右上角「发表」说点什么</p></div>';
+                    return;
+                }
+
+                // 只渲染新增的那一段，避免整列表重绘导致闪一下
+                var from = append ? list.children.length : 0;
+                for (var i = from; i < posts.length; i++) {
+                    list.appendChild(await this.renderMoment(posts[i]));
+                }
+
+                var more = document.getElementById('moments-more');
+                if (more) {
+                    more.style.display = posts.length >= Moments.PAGE * this._momentsPage ? '' : 'none';
+                }
+            } catch (e) {
+                list.innerHTML = '<div class="moments-empty">加载失败：' +
+                    (e.message || e) + '</div>';
+                if (global.console) console.error('[朋友圈]', e);
+            }
+        },
+
+        async renderMoment(post) {
+            var self = this;
+            var myLogin = Store.me.login;
+            var el = document.createElement('div');
+            el.className = 'moment';
+
+            // 头像
+            var av = document.createElement('img');
+            av.className = 'moment-avatar';
+            av.src = 'https://github.com/' + post.author + '.png?size=92';
+            av.onerror = function () { av.style.visibility = 'hidden'; };
+            el.appendChild(av);
+
+            var body = document.createElement('div');
+            body.className = 'moment-body';
+
+            var name = document.createElement('div');
+            name.className = 'moment-name';
+            name.textContent = post.author;
+            body.appendChild(name);
+
+            if (post.text) {
+                var txt = document.createElement('div');
+                txt.className = 'moment-text';
+                txt.textContent = post.text;
+                body.appendChild(txt);
+            }
+
+            // 图片：微信那种九宫格
+            if (post.images && post.images.length) {
+                var grid = document.createElement('div');
+                grid.className = 'moment-grid n' + Math.min(post.images.length, 9);
+                post.images.slice(0, 9).forEach(function (img, idx) {
+                    var cell = document.createElement('div');
+                    cell.className = 'moment-cell';
+                    var im = document.createElement('img');
+                    im.alt = img.n || '';
+                    im.loading = 'lazy';
+                    im.onclick = function () {
+                        self.previewMoment(post, idx);
+                    };
+                    // 先占位，读回来再填
+                    Moments._imgUrl(post.author, img).then(function (u) {
+                        im.src = u;
+                    }).catch(function () { im.alt = '加载失败'; });
+                    cell.appendChild(im);
+                    // GIF 角标
+                    if (/gif/i.test(img.t || '') || /\.gif$/i.test(img.n || '')) {
+                        var gb = document.createElement('span');
+                        gb.className = 'att-gif-badge';
+                        gb.textContent = 'GIF';
+                        cell.appendChild(gb);
+                    }
+                    grid.appendChild(cell);
+                });
+                body.appendChild(grid);
+            }
+
+            // 时间 + 操作
+            var meta = document.createElement('div');
+            meta.className = 'moment-meta';
+            var tm = document.createElement('span');
+            tm.className = 'moment-time';
+            tm.textContent = this.timeAgo(post.ts);
+            meta.appendChild(tm);
+
+            var acts = document.createElement('span');
+            acts.className = 'moment-acts';
+
+            var lb = document.createElement('button');
+            lb.className = 'moment-act';
+            lb.innerHTML = (global.Icons ? Icons.heart(13) : '♥') + ' 赞';
+            var cm = document.createElement('button');
+            cm.className = 'moment-act';
+            cm.innerHTML = (global.Icons ? Icons.comment(13) : '💬') + ' 评论';
+
+            var likeBox = null;
+            lb.onclick = async function () {
+                lb.disabled = true;
+                try {
+                    var liked = await Moments.like(post.author, post.id,
+                        myLogin, Store.me.avatar_url);
+                    lb.classList.toggle('on', liked);
+                    lb.innerHTML = (global.Icons ? Icons.heart(13) : '♥') +
+                        (liked ? ' 已赞' : ' 赞');
+                    await self.refreshMomentLikes(post, likeBox);
+                } catch (e) {
+                    self.toast('操作失败：' + (e.message || e), true);
+                } finally { lb.disabled = false; }
+            };
+            cm.onclick = function () {
+                var text = global.prompt('写评论：');
+                if (!text || !text.trim()) return;
+                Moments.comment(post.author, post.id, myLogin,
+                    Store.me.avatar_url, text.trim())
+                    .then(function () {
+                        self.toast('已评论');
+                        self.refreshMomentComments(post, cbox);
+                    })
+                    .catch(function (e) {
+                        self.toast('评论失败：' + (e.message || e), true);
+                    });
+            };
+
+            acts.appendChild(lb);
+            acts.appendChild(cm);
+
+            // 自己的帖可以删
+            if (String(post.author).toLowerCase() === myLogin.toLowerCase()) {
+                var del = document.createElement('button');
+                del.className = 'moment-act danger';
+                del.textContent = '删除';
+                del.onclick = async function () {
+                    if (!global.confirm('删除这条动态？赞和评论也会一并删除。')) return;
+                    try {
+                        await Moments.remove(myLogin, post.id);
+                        self.toast('已删除');
+                        el.style.opacity = '0';
+                        setTimeout(function () { el.remove(); }, 240);
+                    } catch (e) {
+                        self.toast('删除失败：' + (e.message || e), true);
+                    }
+                };
+                acts.appendChild(del);
+            }
+
+            meta.appendChild(acts);
+            body.appendChild(meta);
+
+            // 赞 + 评论展示区
+            likeBox = document.createElement('div');
+            likeBox.className = 'moment-likes';
+            body.appendChild(likeBox);
+
+            var cbox = document.createElement('div');
+            cbox.className = 'moment-comments';
+            body.appendChild(cbox);
+
+            el.appendChild(body);
+
+            // 异步填充赞/评论（不阻塞列表渲染）
+            this.refreshMomentLikes(post, likeBox);
+            this.refreshMomentComments(post, cbox);
+
+            // 赞按钮当前状态
+            Moments.likes(post.author, post.id).then(function (ls) {
+                var mine = ls.some(function (x) {
+                    return String(x.login).toLowerCase() === myLogin.toLowerCase();
+                });
+                lb.classList.toggle('on', mine);
+                lb.innerHTML = (global.Icons ? Icons.heart(13) : '♥') +
+                    (mine ? ' 已赞' : ' 赞');
+            }).catch(function () { /* 忽略 */ });
+
+            return el;
+        },
+
+        async refreshMomentLikes(post, box) {
+            if (!box) return;
+            try {
+                var ls = await Moments.likes(post.author, post.id);
+                if (!ls.length) { box.style.display = 'none'; return; }
+                box.style.display = '';
+                box.innerHTML = '';
+                var h = document.createElement('span');
+                h.className = 'moment-like-ico';
+                h.innerHTML = (global.Icons ? Icons.heart(12) : '♥');
+                box.appendChild(h);
+                var names = ls.map(function (x) { return x.login; }).join('、');
+                var t = document.createElement('span');
+                t.textContent = names;
+                box.appendChild(t);
+            } catch (e) { /* 忽略 */ }
+        },
+
+        async refreshMomentComments(post, box) {
+            if (!box) return;
+            try {
+                var cs = await Moments.comments(post.author, post.id);
+                if (!cs.length) { box.style.display = 'none'; return; }
+                box.style.display = '';
+                box.innerHTML = '';
+                cs.forEach(function (c) {
+                    var row = document.createElement('div');
+                    row.className = 'moment-comment';
+                    var who = document.createElement('span');
+                    who.className = 'moment-cname';
+                    who.textContent = c.login;
+                    var tx = document.createElement('span');
+                    tx.textContent = c.text;
+                    row.appendChild(who);
+                    if (c.replyTo) {
+                        var rp = document.createElement('span');
+                        rp.className = 'moment-creply';
+                        rp.textContent = '回复 ' + c.replyTo + '：';
+                        row.appendChild(rp);
+                    }
+                    row.appendChild(tx);
+                    box.appendChild(row);
+                });
+            } catch (e) { /* 忽略 */ }
+        },
+
+        /** 朋友圈图片全屏预览 */
+        previewMoment(post, idx) {
+            var self = this;
+            var ov = document.createElement('div');
+            ov.className = 'att-overlay';
+            var box = document.createElement('div');
+            box.className = 'att-ov-box';
+            var close = document.createElement('button');
+            close.className = 'att-ov-close';
+            close.textContent = '✕';
+            close.onclick = function () { document.body.removeChild(ov); };
+            box.appendChild(close);
+
+            var img = document.createElement('img');
+            img.src = '';
+            box.appendChild(img);
+            ov.appendChild(box);
+            ov.onclick = function (e) {
+                if (e.target === ov) document.body.removeChild(ov);
+            };
+            document.body.appendChild(ov);
+
+            var cur = idx;
+            var load = function (i) {
+                var im = post.images[i];
+                if (!im) return;
+                Moments._imgUrl(post.author, im).then(function (u) { img.src = u; });
+            };
+            load(cur);
+
+            // 左右切换
+            if (post.images.length > 1) {
+                var prev = document.createElement('button');
+                prev.className = 'att-ov-nav prev';
+                prev.textContent = '‹';
+                var next = document.createElement('button');
+                next.className = 'att-ov-nav next';
+                next.textContent = '›';
+                prev.onclick = function (e) {
+                    e.stopPropagation();
+                    cur = (cur - 1 + post.images.length) % post.images.length;
+                    load(cur);
+                };
+                next.onclick = function (e) {
+                    e.stopPropagation();
+                    cur = (cur + 1) % post.images.length;
+                    load(cur);
+                };
+                box.appendChild(prev);
+                box.appendChild(next);
+            }
+        },
+
+        /** 发表朋友圈 */
+        async postMoment() {
+            var text = global.prompt('分享新鲜事：');
+            if (text === null) return;
+
+            var imgs = [];
+            var addMore = global.confirm('要配图吗？\n\n确定 = 选择图片，取消 = 直接发表');
+            if (addMore) {
+                var files = await Attach.pick(false);
+                if (files && files.length) {
+                    var parts = Attach.partition(files);
+                    if (parts.tooBig.length) {
+                        this.toast('「' + parts.tooBig[0].name + '」太大，已跳过', true);
+                    }
+                    for (var i = 0; i < parts.ok.length && i < 9; i++) {
+                        try {
+                            this.toast('上传中 ' + (i + 1) + '/' + parts.ok.length);
+                            imgs.push(await Moments.uploadImage(Store.me.login, parts.ok[i]));
+                        } catch (e) {
+                            this.toast('图片上传失败：' + (e.message || e), true);
+                        }
+                    }
+                }
+            }
+
+            try {
+                await Moments.publish(Store.me.login, text, imgs);
+                this.toast('已发表');
+                await this.loadMoments();
+            } catch (e) {
+                this.toast('发表失败：' + (e.message || e), true);
+                if (global.console) console.error('[发表]', e);
+            }
         },
 
         // ── 工具 ───────────────────────────────────────────────
