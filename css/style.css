@@ -568,7 +568,7 @@ input, textarea { font-family: inherit; }
     background: #fff; border-radius: 4px; cursor: pointer;
 }
 .att-file:hover { background: #f7f7f7; }
-.att-icon { font-size: 22px; flex-shrink: 0; }
+.att-icon { flex-shrink: 0; color: #8a8a8a; display: flex; }
 .att-file .att-name { flex: 1; }
 
 .att-player { max-width: 260px; height: 34px; display: block; }
@@ -635,3 +635,242 @@ video.att-player { height: auto; max-height: 260px; }
 }
 .att-act:hover { background: #fff; }
 .att-act:disabled { opacity: .6; color: #9a9a9a; }
+
+
+/* ═══ 图标 ═══════════════════════════════════════════════ */
+.ico { display: block; flex-shrink: 0; }
+.nav-ico .ico { margin: 0 auto; }
+.att-icon .ico { display: block; }
+.att-play .ico { display: block; }
+
+/* ══════════════════════════════════════════════════════════
+   动画
+   统一用一套缓动曲线，跟微信那种"快起慢收"的手感接近：
+   cubic-bezier(.32,.72,0,1) —— 起步快、收尾稳，不弹跳。
+   ══════════════════════════════════════════════════════════ */
+
+:root {
+    --ease: cubic-bezier(.32, .72, 0, 1);
+    --dur-fast: .16s;
+    --dur: .24s;
+    --dur-slow: .38s;
+}
+
+/* ── 关键帧 ─────────────────────────────────────────── */
+
+/* 消息进场：从下方 8px 淡入，带一点点缩放 */
+@keyframes msgIn {
+    from { opacity: 0; transform: translateY(8px) scale(.985); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* 会话列表逐条滑入 */
+@keyframes convIn {
+    from { opacity: 0; transform: translateX(-10px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* 弹窗：从 96% 缩放到 100%，配合遮罩淡入 */
+@keyframes modalIn {
+    from { opacity: 0; transform: scale(.96) translateY(8px); }
+    to   { opacity: 1; transform: none; }
+}
+@keyframes fadeIn {
+    from { opacity: 0; } to { opacity: 1; }
+}
+
+/* 发送中：三点跳动 */
+@keyframes typing {
+    0%, 60%, 100% { transform: translateY(0); opacity: .35; }
+    30%           { transform: translateY(-4px); opacity: 1; }
+}
+
+/* 按钮按压反馈 */
+@keyframes press {
+    0%   { transform: scale(1); }
+    45%  { transform: scale(.93); }
+    100% { transform: scale(1); }
+}
+
+/* 发送成功的小勾 */
+@keyframes popCheck {
+    0%   { transform: scale(.4); opacity: 0; }
+    60%  { transform: scale(1.12); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+/* 上传/转存中的旋转 */
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* 未读红点呼吸 */
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: .55; transform: scale(.88); }
+}
+
+/* 图片加载完成淡入（避免闪一下空白） */
+@keyframes imgFade {
+    from { opacity: 0; filter: blur(4px); }
+    to   { opacity: 1; filter: none; }
+}
+
+/* 骨架屏微光 */
+@keyframes shimmer {
+    from { background-position: -180px 0; }
+    to   { background-position: 320px 0; }
+}
+
+/* ── 应用：消息 ─────────────────────────────────────── */
+
+/* 只让"新出现"的气泡有动画：整体重绘时全部重放会很吵，
+   所以由 JS 给新消息加 .is-new 类，只播一次。 */
+.msg-row.is-new { animation: msgIn var(--dur-slow) var(--ease) both; }
+
+.msg-avatar { transition: transform var(--dur) var(--ease); }
+.msg-row:hover .msg-avatar { transform: scale(1.06); }
+
+.bubble { transition: background var(--dur-fast) ease; }
+
+/* 图片加载完淡入 */
+.att-img { animation: imgFade var(--dur-slow) var(--ease) both; }
+
+/* 发送中 / 失败态 */
+.bubble.pending { opacity: .62; }
+.bubble.failed {
+    background: #fdecec !important;
+    box-shadow: inset 0 0 0 1px #f5b5b5;
+}
+
+/* 发送中气泡右上角跳三点 */
+.msg-row.mine .bubble.pending::after {
+    content: '';
+    position: absolute; top: 50%; right: -18px; margin-top: -2px;
+    width: 4px; height: 4px; border-radius: 50%;
+    background: #9a9a9a;
+    animation: typing 1.4s infinite;
+    box-shadow: 7px 0 0 #9a9a9a, 14px 0 0 #9a9a9a;
+}
+.msg-row.mine .bubble.pending::after { box-shadow: none; }
+
+/* ── 会话列表 ───────────────────────────────────────── */
+
+.conv-item {
+    transition: background var(--dur-fast) ease,
+                transform var(--dur-fast) var(--ease);
+}
+.conv-item:active { transform: scale(.985); }
+
+/* 列表渲染时逐条滑入，最多 12 条（再多就一起出，避免拖沓） */
+.conv-list .conv-item:nth-child(1)  { animation: convIn var(--dur) var(--ease) both; }
+.conv-list .conv-item:nth-child(2)  { animation: convIn var(--dur) var(--ease) .02s both; }
+.conv-list .conv-item:nth-child(3)  { animation: convIn var(--dur) var(--ease) .04s both; }
+.conv-list .conv-item:nth-child(4)  { animation: convIn var(--dur) var(--ease) .06s both; }
+.conv-list .conv-item:nth-child(5)  { animation: convIn var(--dur) var(--ease) .08s both; }
+.conv-list .conv-item:nth-child(6)  { animation: convIn var(--dur) var(--ease) .10s both; }
+.conv-list .conv-item:nth-child(7)  { animation: convIn var(--dur) var(--ease) .12s both; }
+.conv-list .conv-item:nth-child(8)  { animation: convIn var(--dur) var(--ease) .14s both; }
+.conv-list .conv-item:nth-child(9)  { animation: convIn var(--dur) var(--ease) .16s both; }
+.conv-list .conv-item:nth-child(10) { animation: convIn var(--dur) var(--ease) .18s both; }
+.conv-list .conv-item:nth-child(11) { animation: convIn var(--dur) var(--ease) .20s both; }
+.conv-list .conv-item:nth-child(12) { animation: convIn var(--dur) var(--ease) .22s both; }
+
+.conv-badge { animation: pulse 2.2s ease-in-out infinite; }
+
+/* ── 导航 ───────────────────────────────────────────── */
+
+.nav-btn {
+    transition: color var(--dur-fast) ease, transform var(--dur-fast) var(--ease);
+}
+.nav-btn:active { transform: scale(.9); }
+.nav-ico .ico { transition: transform var(--dur) var(--ease); }
+.nav-btn.active .nav-ico .ico { animation: press var(--dur) var(--ease); }
+
+/* ── 按钮 ───────────────────────────────────────────── */
+
+.send-btn, .add-btn, .attach-btn, .btn-primary, .btn-soft, .btn-danger {
+    transition: background var(--dur-fast) ease,
+                transform var(--dur-fast) var(--ease),
+                opacity var(--dur-fast) ease;
+}
+.send-btn:active, .btn-primary:active { transform: scale(.95); }
+.send-btn:disabled { opacity: .55; }
+
+/* 发送成功：按钮里闪一下对勾 */
+.send-btn.just-sent { animation: popCheck var(--dur-slow) var(--ease); }
+
+/* ── 弹窗 ───────────────────────────────────────────── */
+
+.modal { animation: fadeIn var(--dur-fast) ease both; }
+.modal-box { animation: modalIn var(--dur) var(--ease) both; }
+
+/* ── 附件操作栏 ─────────────────────────────────────── */
+
+.att-actions {
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity var(--dur-fast) ease, transform var(--dur-fast) var(--ease);
+}
+/* 平时收起，鼠标移上去才展开 —— 不然每个气泡下面都挂一排按钮太吵 */
+.att:hover .att-actions { opacity: 1; transform: none; }
+/* 触屏没有 hover，常驻显示 */
+@media (hover: none) {
+    .att-actions { opacity: 1; transform: none; }
+}
+
+.att-act:active { transform: scale(.94); }
+
+/* 转存/上传中的旋转指示器 */
+.act-spinner {
+    display: inline-block; width: 11px; height: 11px;
+    margin-right: 4px; vertical-align: -1px;
+    border: 1.6px solid currentColor;
+    border-right-color: transparent; border-radius: 50%;
+    animation: spin .7s linear infinite;
+}
+
+/* 图片加载占位骨架 */
+.att-img.skeleton {
+    min-height: 120px; min-width: 160px;
+    background: linear-gradient(90deg, #eee 25%, #f5f5f5 50%, #eee 75%);
+    background-size: 400px 100%;
+    animation: shimmer 1.2s linear infinite;
+}
+
+/* ── 加载与提示 ─────────────────────────────────────── */
+
+.loading { animation: fadeIn var(--dur) ease both; }
+
+.toast {
+    animation: modalIn var(--dur) var(--ease) both;
+}
+
+/* 邀请条滑入 */
+.invite-banner,
+#invite-banner { animation: fadeIn var(--dur) ease both; }
+
+/* ── 滚动条：细一点，滚动时显现 ─────────────────────── */
+
+.conv-list::-webkit-scrollbar,
+.messages::-webkit-scrollbar { width: 6px; }
+.conv-list::-webkit-scrollbar-thumb,
+.messages::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, .16); border-radius: 3px;
+}
+.conv-list::-webkit-scrollbar-thumb:hover,
+.messages::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .3); }
+.conv-list::-webkit-scrollbar-track,
+.messages::-webkit-scrollbar-track { background: transparent; }
+
+/* ═══ 无障碍：尊重系统"减弱动效" ═══════════════════════
+   前庭功能障碍用户会因动画头晕，系统开了这个开关就必须停。
+   ══════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
