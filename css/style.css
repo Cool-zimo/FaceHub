@@ -622,3 +622,16 @@ video.att-player { height: auto; max-height: 260px; }
 }
 .invite-ignore:hover { background: #f2f2f2; color: #d93025; }
 .invite-ignore:disabled { opacity: .5; }
+
+/* 附件操作栏：气泡上直接转存 / 下载 */
+.att-actions {
+    display: flex; gap: 6px; margin-top: 4px;
+    padding-top: 4px; border-top: 1px solid rgba(0, 0, 0, .06);
+}
+.att-act {
+    padding: 3px 8px; font-size: 11.5px;
+    border: 1px solid #d5d5d5; border-radius: 3px;
+    background: rgba(255, 255, 255, .8); color: #576b95;
+}
+.att-act:hover { background: #fff; }
+.att-act:disabled { opacity: .6; color: #9a9a9a; }
