@@ -387,16 +387,38 @@
         },
 
         // ── 评论 ─────────────────────────────────────────
-        /** 评论。文件名带时间戳，同一人可评论多条 */
-        async comment(owner, postId, login, avatar, text, replyTo) {
+        /**
+         * 评论。文件名带时间戳，同一人可评论多条
+         *
+         * @param {File[]} files 可选，评论配图（微信支持在评论里发图）
+         *
+         * 图存在评论者**自己的**主页仓库 cm/ 下：
+         *   · 不往帖子作者的仓库写 —— 否则你得有对方仓库的写权限，
+         *     而评论别人的帖子本来就不该需要
+         *   · 存的是路径引用（{p,n,t,s}），不是 base64，
+         *     否则一条评论就把 issues/文件 撑爆
+         */
+        async comment(owner, postId, login, avatar, text, replyTo, files) {
             var repo = this.repoName(owner);
             var ts = Date.now();
+
+            var imgs = [];
+            if (files && files.length) {
+                for (var i = 0; i < files.length && i < 3; i++) {
+                    // 评论图最多 3 张（微信也是这个量级，评论区不宜太长）
+                    var up = await this.uploadImage(login, files[i]);
+                    // 不存 dataUrl：那是几 MB 的 base64，写进 JSON 太浪费
+                    imgs.push({ p: up.p, n: up.n, t: up.t, s: up.s });
+                }
+            }
+
             var path = 'comments/' + postId + '/' + ts + '-' +
                 login.toLowerCase() + '-' + Math.random().toString(36).slice(2, 6) + '.json';
 
             await global.API.writeFile(owner, repo, path,
                 JSON.stringify({
                     login: login, avatar: avatar, text: text,
+                    imgs: imgs.length ? imgs : undefined,
                     replyTo: replyTo || null, ts: ts
                 }),
                 '评论', null, 'main');
@@ -441,6 +463,16 @@
          * raw.githubusercontent 就行 —— 不用 contents API，
          * 省配额也更快（限流额度是分开计的）。
          */
+        /**
+         * 评论配图的地址
+         *
+         * ★ 注意 login 是**评论者**：图存在他自己的主页仓库。
+         *   直接复用帖子作者的 login 会 404。
+         */
+        async _commentImgUrl(login, img) {
+            return this._imgUrl(login, img);
+        },
+
         async _imgUrl(login, img) {
             var ck = 'fh:mimg:' + login + '/' + img.p;
             var hit = global.API._ls(ck);
