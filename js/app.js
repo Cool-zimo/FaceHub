@@ -351,6 +351,22 @@
             var mb = document.getElementById('me-back');
             if (mb) mb.onclick = function () { self.hideMe(); };
 
+            // 小程序
+            Array.prototype.forEach.call(
+                document.querySelectorAll('.nav-btn[data-tab="apps"]'),
+                function (b) { b.onclick = function () { self.showApps(); }; }
+            );
+            var ab = document.getElementById('apps-back');
+            if (ab) ab.onclick = function () { self.hideApps(); };
+            var as = document.getElementById('apps-search');
+            if (as) as.onclick = function () { self.searchApps(); };
+            var ac = document.getElementById('apps-close');
+            if (ac) ac.onclick = function () { self.closeApp(); };
+            var ao = document.getElementById('apps-open');
+            if (ao) ao.onclick = function () {
+                if (self._curApp) global.open(MiniApp.url(self._curApp), '_blank');
+            };
+
             // 图标：把 data-ico 占位渲染成内联 SVG
             self.mountIcons();
 
@@ -1955,6 +1971,183 @@
             void btn.offsetWidth;      // 强制 reflow
             btn.classList.add('just-sent');
             setTimeout(function () { btn.classList.remove('just-sent'); }, 400);
+        },
+
+        // ══════════════════════════════════════════════════════
+        //  小程序
+        // ══════════════════════════════════════════════════════
+
+        async showApps() {
+            var pane = document.getElementById('apps-pane');
+            var app = document.getElementById('app');
+            var mp = document.getElementById('moments-pane');
+            var me = document.getElementById('me-pane');
+            if (mp) mp.style.display = 'none';
+            if (me) me.style.display = 'none';
+            if (app) app.style.display = 'none';
+            if (pane) pane.style.display = 'flex';
+            this.mountIcons();
+            await this.loadApps();
+        },
+
+        hideApps() {
+            var pane = document.getElementById('apps-pane');
+            var app = document.getElementById('app');
+            if (pane) pane.style.display = 'none';
+            if (app) app.style.display = '';
+            this.closeApp();
+        },
+
+        async loadApps() {
+            var box = document.getElementById('apps-list');
+            if (!box) return;
+            var self = this;
+            box.innerHTML = '<div class="moments-loading">载入中…</div>';
+
+            try {
+                var mine = await MiniApp.mine(Store.me.login);
+                var hist = MiniApp.history();
+
+                box.innerHTML = '';
+
+                // 最近使用
+                if (hist.length) {
+                    box.appendChild(this._appsSection('最近使用', hist, true));
+                }
+                box.appendChild(this._appsSection('我的小程序', mine, false));
+            } catch (e) {
+                box.innerHTML = '<div class="moments-empty">载入失败：' +
+                    (e.message || e) + '</div>';
+            }
+        },
+
+        _appsSection(title, list, isHistory) {
+            var self = this;
+            var wrap = document.createElement('div');
+            wrap.className = 'apps-sec';
+
+            var h = document.createElement('div');
+            h.className = 'apps-sec-t';
+            h.textContent = title;
+            wrap.appendChild(h);
+
+            var grid = document.createElement('div');
+            grid.className = 'apps-grid';
+
+            list.forEach(function (a) {
+                var cell = document.createElement('button');
+                cell.className = 'apps-cell';
+
+                var ic = document.createElement('span');
+                ic.className = 'apps-ic';
+                if (a.icon) {
+                    var im = document.createElement('img');
+                    im.src = a.icon;
+                    im.alt = '';
+                    im.onerror = function () { im.style.display = 'none'; };
+                    ic.appendChild(im);
+                } else {
+                    // 没图标就用首字，跟微信默认小程序图标一个思路
+                    ic.textContent = (a.name || '?').charAt(0).toUpperCase();
+                    ic.style.background = self._appColor(a.name || '');
+                }
+
+                var nm = document.createElement('span');
+                nm.className = 'apps-nm';
+                nm.textContent = a.name;
+
+                cell.appendChild(ic);
+                cell.appendChild(nm);
+
+                cell.onclick = function () { self.openApp(a); };
+
+                // 历史记录的长按/右键可移除（内置不可删）
+                if (isHistory && !a.builtin) {
+                    var del = document.createElement('span');
+                    del.className = 'apps-del';
+                    del.textContent = '✕';
+                    del.onclick = function (e) {
+                        e.stopPropagation();
+                        MiniApp.removeHistory(a.id);
+                        self.loadApps();
+                    };
+                    cell.appendChild(del);
+                }
+
+                grid.appendChild(cell);
+            });
+
+            wrap.appendChild(grid);
+            return wrap;
+        },
+
+        /** 给没图标的小程序一个稳定配色（同一名字永远是同一颜色） */
+        _appColor(name) {
+            var hues = ['#07C160', '#1989fa', '#ff976a', '#7232dd',
+                '#f44', '#5ac8fa', '#ffb400', '#07c2c2'];
+            var sum = 0;
+            for (var i = 0; i < name.length; i++) sum += name.charCodeAt(i);
+            return hues[sum % hues.length];
+        },
+
+        /** 打开小程序：iframe 加载，并记录历史 */
+        openApp(a) {
+            var player = document.getElementById('apps-player');
+            var frame = document.getElementById('apps-frame');
+            var nm = document.getElementById('apps-player-name');
+            var list = document.getElementById('apps-list');
+            if (!player || !frame) return;
+
+            nm.textContent = a.name;
+            frame.src = MiniApp.url(a);
+            player.style.display = 'flex';
+            if (list) list.style.display = 'none';
+
+            this._curApp = a;
+            MiniApp.record(a);
+        },
+
+        closeApp() {
+            var player = document.getElementById('apps-player');
+            var frame = document.getElementById('apps-frame');
+            var list = document.getElementById('apps-list');
+            if (player) player.style.display = 'none';
+            if (frame) frame.src = 'about:blank';   // 真正卸载，别留后台跑
+            if (list) list.style.display = '';
+            this._curApp = null;
+        },
+
+        /** 搜索并添加小程序 */
+        async searchApps() {
+            var q = global.prompt('搜索小程序（输入关键词，或留空看全部）：');
+            if (q === null) return;
+            var self = this;
+
+            try {
+                this.toast('搜索中…');
+                var found = await MiniApp.search(q);
+                if (!found.length) {
+                    this.toast('没找到。也可以直接输入 owner/repo 添加。');
+                    var spec = global.prompt('手动添加（格式 owner/repo）：');
+                    if (!spec) return;
+                    var parts = spec.split('/');
+                    if (parts.length !== 2) { this.toast('格式不对', true); return; }
+                    var a = await MiniApp.resolve(parts[0].trim(), parts[1].trim());
+                    MiniApp.record(a);
+                    this.toast('已添加：' + a.name);
+                    await this.loadApps();
+                    return;
+                }
+                var names = found.map(function (x, i) {
+                    return (i + 1) + '. ' + x.name + '（' + x.owner + '）';
+                }).join('\n');
+                var pick = global.prompt('找到：\n' + names + '\n\n输入序号打开：');
+                var idx = parseInt(pick, 10) - 1;
+                if (isNaN(idx) || idx < 0 || idx >= found.length) return;
+                this.openApp(found[idx]);
+            } catch (e) {
+                this.toast('搜索失败：' + (e.message || e), true);
+            }
         },
 
         /** 「我」页面 */
