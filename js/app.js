@@ -1912,7 +1912,9 @@
         async showMoments() {
             var mp = document.getElementById('moments-pane');
             var app = document.getElementById('app');
-            if (mp) mp.style.display = '';
+            // mp 是 app 的兄弟节点（不是子节点），所以两个 display 互不干扰。
+            // 之前 mp 嵌在 app 里面，藏 app 等于把它一起藏了。
+            if (mp) mp.style.display = 'flex';
             if (app) app.style.display = 'none';
             this._momentsPage = 1;
             this.mountIcons();
