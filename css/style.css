@@ -1343,3 +1343,11 @@ video.att-player { height: auto; max-height: 260px; }
     width: 56px; height: 56px; border-radius: 12px;
     object-fit: cover; opacity: .5; margin-bottom: 10px;
 }
+
+/* 邀请等待提示 */
+.invite-tip {
+    margin: 8px 12px; padding: 10px 12px;
+    background: #fff8e6; border: 1px solid #f0dfae; border-radius: 8px;
+    font-size: 13px; color: #7a5a12; line-height: 1.55;
+}
+.invite-tip-sub { margin-top: 4px; color: #9a8558; font-size: 12px; }
