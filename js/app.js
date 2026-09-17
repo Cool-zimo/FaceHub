@@ -356,6 +356,27 @@
                 document.querySelectorAll('.nav-btn[data-tab="apps"]'),
                 function (b) { b.onclick = function () { self.showApps(); }; }
             );
+            // 发现（找人/关注）
+            Array.prototype.forEach.call(
+                document.querySelectorAll('.nav-btn[data-tab="discover"]'),
+                function (b) { b.onclick = function () { self.showDiscover(); }; }
+            );
+            var db = document.getElementById('discover-back');
+            if (db) db.onclick = function () { self._hideAllPanes(null); self.switchTab('chats'); };
+            var dg = document.getElementById('discover-go');
+            if (dg) dg.onclick = function () { self.searchPeople(); };
+            var di = document.getElementById('discover-input');
+            if (di) di.onkeydown = function (e) {
+                if (e.key === 'Enter') self.searchPeople();
+            };
+            var pb = document.getElementById('profile-back');
+            if (pb) pb.onclick = function () {
+                var pp = document.getElementById('profile-pane');
+                if (pp) pp.style.display = 'none';
+                var dp = document.getElementById('discover-pane');
+                if (dp) dp.style.display = 'flex';
+            };
+
             var ab = document.getElementById('apps-back');
             if (ab) ab.onclick = function () { self.hideApps(); };
             var as = document.getElementById('apps-search');
@@ -1974,6 +1995,258 @@
         },
 
         // ══════════════════════════════════════════════════════
+        //  发现 / 关注
+        // ══════════════════════════════════════════════════════
+
+        showDiscover() {
+            var pane = document.getElementById('discover-pane');
+            this._hideAllPanes(pane);
+            if (pane) pane.style.display = 'flex';
+            this.mountIcons();
+            this.loadDiscover();
+        },
+
+        /** 隐藏所有全屏面板，只留一个 */
+        _hideAllPanes(except) {
+            ['moments-pane', 'apps-pane', 'me-pane', 'profile-pane', 'discover-pane']
+                .forEach(function (id) {
+                    var el = document.getElementById(id);
+                    if (el && el !== except) el.style.display = 'none';
+                });
+            var app = document.getElementById('app');
+            if (app) app.style.display = (except ? 'none' : '');
+        },
+
+        /** 默认展示：已关注的人 + 可能认识（会话里的对象） */
+        async loadDiscover() {
+            var box = document.getElementById('discover-list');
+            if (!box) return;
+            var self = this;
+            box.innerHTML = '<div class="moments-loading">加载中…</div>';
+
+            try {
+                var following = await Moments.following(Store.me.login);
+                box.innerHTML = '';
+
+                if (following.length) {
+                    box.appendChild(this._peopleSection('已关注', following, true));
+                }
+
+                // 可能认识：私聊对象里挑几个
+                var convs = (this.convs || []).filter(function (c) {
+                    return c.type === 'dm' && c.peer;
+                });
+                var seen = {};
+                following.forEach(function (f) { seen[f] = 1; });
+                var cand = [];
+                convs.forEach(function (c) {
+                    if (seen[c.peer] || c.peer === Store.me.login) return;
+                    seen[c.peer] = 1;
+                    cand.push(c.peer);
+                });
+
+                if (cand.length) {
+                    box.appendChild(this._peopleSection('可能认识', cand, false));
+                } else if (!following.length) {
+                    box.innerHTML = '<div class="moments-empty">' +
+                        '<p>还没有关注任何人</p>' +
+                        '<p class="sub">搜个用户名试试，关注后 TA 的动态会出现在朋友圈</p></div>';
+                }
+            } catch (e) {
+                box.innerHTML = '<div class="moments-empty">加载失败：' + (e.message || e) + '</div>';
+            }
+        },
+
+        _peopleSection(title, logins, canUnfollow) {
+            var self = this;
+            var wrap = document.createElement('div');
+            wrap.className = 'disc-sec';
+            var h = document.createElement('div');
+            h.className = 'disc-sec-t';
+            h.textContent = title;
+            wrap.appendChild(h);
+            logins.forEach(function (lg) {
+                wrap.appendChild(self._personRow(lg, canUnfollow));
+            });
+            return wrap;
+        },
+
+        _personRow(login, canUnfollow) {
+            var self = this;
+            var row = document.createElement('div');
+            row.className = 'disc-row';
+
+            var av = document.createElement('img');
+            av.className = 'disc-av';
+            av.src = 'https://github.com/' + login + '.png?size=80';
+            av.alt = '';
+            av.onclick = function () { self.showProfile(login); };
+            row.appendChild(av);
+
+            var info = document.createElement('div');
+            info.className = 'disc-info';
+            info.onclick = function () { self.showProfile(login); };
+            var nm = document.createElement('div');
+            nm.className = 'disc-nm';
+            nm.textContent = login;
+            info.appendChild(nm);
+            row.appendChild(info);
+
+            var btn = document.createElement('button');
+            btn.className = 'btn-primary btn-sm' + (canUnfollow ? ' btn-ghost' : '');
+            btn.textContent = canUnfollow ? '已关注' : '关注';
+            btn.onclick = async function () {
+                btn.disabled = true;
+                try {
+                    if (canUnfollow) await Moments.unfollow(Store.me.login, login);
+                    else await Moments.follow(Store.me.login, login);
+                    self.toast(canUnfollow ? '已取消关注' : '已关注 ' + login);
+                    // 朋友圈缓存要清，否则时间线不会变
+                    Moments._invalidate(Store.me.login, Moments.repoName(Store.me.login));
+                    await self.loadDiscover();
+                } catch (e) {
+                    self.toast('操作失败：' + (e.message || e), true);
+                    btn.disabled = false;
+                }
+            };
+            row.appendChild(btn);
+            return row;
+        },
+
+        /** 跟某人开私聊（没有就建） */
+        async startDM(peer) {
+            var self = this;
+            try {
+                this.toast('正在创建会话…');
+                var room = await Chat.start(peer);
+                this._hideAllPanes(null);
+                this.switchTab('chats');
+                await this.loadConvs();
+                var want = Chat.roomName(Store.me.login, peer);
+                var c = (this.convs || []).filter(function (x) {
+                    return x.name === want;
+                })[0];
+                if (c) await this.openConv(c);
+                else this.toast('会话已创建，点聊天列表刷新一下');
+            } catch (e) {
+                this.toast('创建会话失败：' + (e.message || e), true);
+            }
+        },
+
+        /** 搜索用户 */
+        async searchPeople() {
+            var inp = document.getElementById('discover-input');
+            var q = inp ? inp.value.trim() : '';
+            if (!q) { this.toast('输入用户名', true); return; }
+            var box = document.getElementById('discover-list');
+            var self = this;
+            box.innerHTML = '<div class="moments-loading">搜索中…</div>';
+
+            try {
+                var r = await global.API.req('/search/users?q=' +
+                    encodeURIComponent(q) + '&per_page=15');
+                var items = (r.data && r.data.items) || [];
+                box.innerHTML = '';
+                if (!items.length) {
+                    box.innerHTML = '<div class="moments-empty">没找到「' + q + '」</div>';
+                    return;
+                }
+                box.appendChild(this._peopleSection('搜索结果',
+                    items.map(function (u) { return u.login; }), false));
+            } catch (e) {
+                box.innerHTML = '<div class="moments-empty">搜索失败：' +
+                    (e.message || e) + '</div>';
+            }
+        },
+
+        // ── 某人主页 ─────────────────────────────────────
+        async showProfile(login) {
+            var pane = document.getElementById('profile-pane');
+            this._hideAllPanes(pane);
+            if (pane) pane.style.display = 'flex';
+            var title = document.getElementById('profile-title');
+            if (title) title.textContent = login;
+
+            var body = document.getElementById('profile-body');
+            var self = this;
+            if (!body) return;
+            body.innerHTML = '<div class="moments-loading">加载中…</div>';
+            this.mountIcons();
+
+            try {
+                var isMe = (login === Store.me.login);
+                var following = await Moments.following(Store.me.login);
+                var isFollowing = following.indexOf(login) >= 0;
+                var posts = await Moments.postList(login);
+
+                body.innerHTML = '';
+
+                // 头部
+                var head = document.createElement('div');
+                head.className = 'prof-head';
+                var av = document.createElement('img');
+                av.className = 'prof-av';
+                av.src = 'https://github.com/' + login + '.png?size=160';
+                head.appendChild(av);
+                var nm = document.createElement('div');
+                nm.className = 'prof-nm';
+                nm.textContent = login;
+                head.appendChild(nm);
+                var cnt = document.createElement('div');
+                cnt.className = 'prof-cnt';
+                cnt.textContent = posts.length + ' 条动态';
+                head.appendChild(cnt);
+
+                if (!isMe) {
+                    var btn = document.createElement('button');
+                    btn.className = 'btn-primary btn-sm' + (isFollowing ? ' btn-ghost' : '');
+                    btn.textContent = isFollowing ? '已关注' : '关注';
+                    btn.onclick = async function () {
+                        btn.disabled = true;
+                        try {
+                            if (isFollowing) await Moments.unfollow(Store.me.login, login);
+                            else await Moments.follow(Store.me.login, login);
+                            self.toast(isFollowing ? '已取消关注' : '已关注');
+                            Moments._invalidate(Store.me.login, Moments.repoName(Store.me.login));
+                            await self.showProfile(login);
+                        } catch (e) {
+                            self.toast('失败：' + (e.message || e), true);
+                            btn.disabled = false;
+                        }
+                    };
+                    head.appendChild(btn);
+
+                    // 私聊入口
+                    var dm = document.createElement('button');
+                    dm.className = 'btn-primary btn-sm';
+                    dm.textContent = '发消息';
+                    dm.onclick = function () { self.startDM(login); };
+                    head.appendChild(dm);
+                }
+                body.appendChild(head);
+
+                if (!posts.length) {
+                    var em = document.createElement('div');
+                    em.className = 'moments-empty';
+                    em.innerHTML = '<p>还没有动态</p>';
+                    body.appendChild(em);
+                    return;
+                }
+
+                // 只取最新 12 条，别一上来就读一堆
+                var show = posts.slice(0, 12);
+                for (var i = 0; i < show.length; i++) {
+                    var p = await Moments.post(login, show[i]);
+                    if (!p) continue;
+                    p.author = login;
+                    body.appendChild(await this.renderMoment(p));
+                }
+            } catch (e) {
+                body.innerHTML = '<div class="moments-empty">加载失败：' + (e.message || e) + '</div>';
+            }
+        },
+
+        // ══════════════════════════════════════════════════════
         //  小程序
         // ══════════════════════════════════════════════════════
 
@@ -2386,6 +2659,11 @@
             var av = document.createElement('img');
             av.className = 'moment-avatar';
             av.src = 'https://github.com/' + post.author + '.png?size=92';
+            // 点头像进 TA 主页（可以关注 / 发消息）
+            av.style.cursor = 'pointer';
+            (function (who) {
+                av.onclick = function () { self.showProfile(who); };
+            })(post.author);
             av.onerror = function () { av.style.visibility = 'hidden'; };
             el.appendChild(av);
 
