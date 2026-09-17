@@ -50,6 +50,9 @@
     <button class="nav-btn" data-tab="moments" title="朋友圈">
       <span class="nav-ico" data-ico="moments"></span><span class="nav-txt">朋友圈</span>
     </button>
+    <button class="nav-btn" data-tab="apps" title="小程序">
+      <span class="nav-ico" data-ico="grid"></span><span class="nav-txt">小程序</span>
+    </button>
     <button class="nav-btn" data-tab="contacts" title="通讯录">
       <span class="nav-ico" data-ico="contacts"></span><span class="nav-txt">通讯录</span>
       <i id="badge-invite" class="nav-badge" style="display:none"></i>
@@ -111,6 +114,24 @@
     </header>
     <div id="moments-list" class="moments-list"></div>
     <div id="moments-more" class="moments-more" style="display:none">加载更多</div>
+</section>
+
+<!-- ═══ 小程序 ═══ -->
+<section id="apps-pane" class="apps-pane" style="display:none">
+  <header class="moments-head">
+    <button id="apps-back" class="back-btn" title="返回" data-ico="back"></button>
+    <span class="moments-title">小程序</span>
+    <button id="apps-search" class="btn-primary btn-sm" title="搜索">搜索</button>
+  </header>
+  <div id="apps-list" class="apps-list"></div>
+  <div id="apps-player" class="apps-player" style="display:none">
+    <div class="apps-player-bar">
+      <button id="apps-close" class="apps-close" title="关闭">✕</button>
+      <span id="apps-player-name" class="apps-player-name"></span>
+      <button id="apps-open" class="apps-open" title="新窗口打开">↗</button>
+    </div>
+    <iframe id="apps-frame" class="apps-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+  </div>
 </section>
 
 <!-- ═══ 我（个人页，不用弹窗 —— 那么大的空间浪费了） ═══ -->
@@ -205,6 +226,7 @@
 <script src="js/group.js"></script>
 <script src="js/attach.js"></script>
 <script src="js/moments.js"></script>
+<script src="js/miniapp.js"></script>
 <script src="js/icons.js"></script>
 <script src="js/app.js"></script>
 </body>
