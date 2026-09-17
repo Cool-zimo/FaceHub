@@ -200,6 +200,64 @@
             return out;
         },
 
+        /**
+         * 读大文件二进制（走 Git Blob API）
+         *
+         * ★ 为什么需要这个：contents API 对 >1MB 的文件，
+         *   `content` 字段直接返回 null（只给 sha）。
+         *   这正是分片（2MB）上传成功、读回却为空的原因。
+         *
+         * ★ 为什么不用 raw CDN：会话仓库是**私有**的，
+         *   raw.githubusercontent.com 匿名访问只会 404。
+         *   Git Blob API 走正常认证，私有仓库也能读。
+         *
+         * 流程：先 contents 拿 sha（content 为 null 也无妨），
+         *       再 /git/blobs/{sha} 拿完整内容。
+         *
+         * @returns {Promise<Uint8Array>}
+         */
+        async readLargeFile(owner, repo, path, branch) {
+            branch = branch || 'main';
+            var meta = await this.req(
+                '/repos/' + owner + '/' + repo + '/contents/' +
+                path.split('/').map(encodeURIComponent).join('/') +
+                '?ref=' + encodeURIComponent(branch)
+            );
+            var sha = meta.data && meta.data.sha;
+            if (!sha) throw new Error('拿不到文件 sha');
+
+            var blob = await this.req(
+                '/repos/' + owner + '/' + repo + '/git/blobs/' + sha
+            );
+            var b64 = blob.data && blob.data.content;
+            if (!b64) throw new Error('blob 内容为空');
+
+            // blob 的 base64 带换行，必须先清掉
+            b64 = b64.replace(/\s/g, '');
+            return this._b64ToU8
+                ? this._b64ToU8(b64)
+                : null;      // 由调用方转换
+        },
+
+        /** 读大文件，返回 base64 字符串 */
+        async readLargeFileB64(owner, repo, path, branch) {
+            branch = branch || 'main';
+            var meta = await this.req(
+                '/repos/' + owner + '/' + repo + '/contents/' +
+                path.split('/').map(encodeURIComponent).join('/') +
+                '?ref=' + encodeURIComponent(branch)
+            );
+            var sha = meta.data && meta.data.sha;
+            if (!sha) throw new Error('拿不到文件 sha');
+
+            var blob = await this.req(
+                '/repos/' + owner + '/' + repo + '/git/blobs/' + sha
+            );
+            var b64 = blob.data && blob.data.content;
+            if (!b64) throw new Error('blob 内容为空');
+            return b64.replace(/\s/g, '');
+        },
+
         /** 取 base64 原文（去换行），不做任何字符解码 */
         _rawBase64(data) {
             if (!data) return '';
