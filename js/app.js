@@ -398,6 +398,14 @@
 
             // 详情
             document.getElementById('info-btn').onclick = function () { self.openInfo(); };
+            // 点标题栏也能进详情 —— 右上角「⋯」太容易被忽略，
+            // 群成员管理藏在里面，很多人根本找不到。
+            var cht = document.querySelector('#chat-head .chat-head-txt');
+            if (cht) {
+                cht.style.cursor = 'pointer';
+                cht.title = '查看会话详情';
+                cht.onclick = function () { self.openInfo(); };
+            }
             document.getElementById('info-modal-x').onclick = function () {
                 document.getElementById('info-modal').style.display = 'none';
             };
@@ -866,7 +874,14 @@
 
             document.getElementById('chat-head').style.display = '';
             document.getElementById('composer').style.display = '';
-            document.getElementById('chat-title').textContent = this.displayName(c);
+            var ttl = this.displayName(c);
+            // 群聊带人数（微信风格）。数字来自 openGroup 时缓存的 meta
+            if (c.type === 'group') {
+                var _gm = this._grpMeta && this._grpMeta[c.name];
+                var _n = _gm ? ((_gm.members || []).length) : 0;
+                if (_n) ttl += '(' + _n + ')';
+            }
+            document.getElementById('chat-title').textContent = ttl;
             document.getElementById('chat-sub').textContent =
                 c.type === 'group' ? '群聊 · ' + c.name : '🔒 端到端加密';
 
@@ -917,6 +932,13 @@
                 this.getNick(c.owner, c.name) || meta.name || c.title;
             document.getElementById('chat-sub').textContent =
                 (meta.members ? meta.members.length : 1) + ' 人';
+
+            // 缓存群 meta，标题栏要用成员数
+            try {
+                var _meta = await Group.meta(c.owner, c.name);
+                if (!this._grpMeta) this._grpMeta = {};
+                this._grpMeta[c.name] = _meta;
+            } catch (e) { /* 忽略 */ }
 
             // 自己先发布公钥，让其他成员能给我分发群密钥
             try {
@@ -1624,6 +1646,28 @@
             this.bindInfoActions(c, meta);
         },
 
+        /**
+         * 成员变更后：
+         * ① 刷新群 meta 缓存（标题栏人数）
+         * ② 清关系缓存（朋友圈要跟着变）
+         * ③ 重绘标题
+         */
+        async _afterMemberChange(c) {
+            try {
+                var m = await Group.meta(c.owner, c.name);
+                if (!this._grpMeta) this._grpMeta = {};
+                this._grpMeta[c.name] = m;
+            } catch (e) { /* 忽略 */ }
+            if (global.Moments) Moments.invalidateRelations(Store.me.login);
+            // 标题人数
+            var t = document.getElementById('chat-title');
+            if (t && c.type === 'group') {
+                var n = (this._grpMeta[c.name] &&
+                    (this._grpMeta[c.name].members || []).length) || 0;
+                t.textContent = this.displayName(c) + (n ? '(' + n + ')' : '');
+            }
+        },
+
         bindInfoActions(c, meta) {
             var self = this;
 
@@ -1677,6 +1721,8 @@
                         ? '已邀请 ' + who + '，群密钥同时发出'
                         : '已邀请 ' + who + '（他登录后会收到群密钥）');
                     inp.value = '';
+                    return self._afterMemberChange(c);
+                }).then(function () {
                     return self.openInfo();
                 }).then(function () {
                     return self.loadConvs();
@@ -1701,8 +1747,9 @@
                         btn.disabled = true; btn.textContent = '…';
                         Group.removeMember(c.owner, c.name, who).then(function (r) {
                             self.toast('已移除 ' + who + (r.rotated ? '，群密钥已轮换' : ''));
-                            return self.openInfo();
-                        }).then(function () { return self.loadConvs(); })
+                            return self._afterMemberChange(c);
+                        }).then(function () { return self.openInfo(); })
+                          .then(function () { return self.loadConvs(); })
                           .catch(function (e) {
                               self.toast('移除失败：' + e.message, true);
                               btn.disabled = false; btn.textContent = '移除';
@@ -2026,31 +2073,57 @@
 
             try {
                 var following = await Moments.following(Store.me.login);
+                var rel = await Moments.relations(Store.me.login);
                 box.innerHTML = '';
 
-                if (following.length) {
-                    box.appendChild(this._peopleSection('已关注', following, true));
+                /**
+                 * ★ 聊天关系自动可见，不用关注
+                 * 都已经在聊天了，没道理还要再点一次"关注"。
+                 * 所以这一块只展示、不提供关注按钮。
+                 */
+                if (rel.length) {
+                    var relWrap = document.createElement('div');
+                    relWrap.className = 'disc-sec';
+                    var rh = document.createElement('div');
+                    rh.className = 'disc-sec-t';
+                    rh.textContent = '聊天关系 · 动态自动可见（' + rel.length + '）';
+                    relWrap.appendChild(rh);
+                    var rtip = document.createElement('div');
+                    rtip.className = 'disc-tip';
+                    rtip.textContent = '有私聊或同群的人，朋友圈会自动显示 TA 的动态，无需关注';
+                    relWrap.appendChild(rtip);
+                    rel.forEach(function (lg) {
+                        relWrap.appendChild(self._personRow(lg, false, true));
+                    });
+                    box.appendChild(relWrap);
                 }
 
-                // 可能认识：私聊对象里挑几个
+                if (following.length) {
+                    box.appendChild(this._peopleSection('已关注的陌生人', following, true));
+                }
+
+                // 可能认识：会话对象里还没在关系里的
                 var convs = (this.convs || []).filter(function (c) {
                     return c.type === 'dm' && c.peer;
                 });
                 var seen = {};
-                following.forEach(function (f) { seen[f] = 1; });
+                following.concat(rel).forEach(function (f) {
+                    seen[String(f).toLowerCase()] = 1;
+                });
                 var cand = [];
                 convs.forEach(function (c) {
-                    if (seen[c.peer] || c.peer === Store.me.login) return;
-                    seen[c.peer] = 1;
+                    var k = String(c.peer).toLowerCase();
+                    if (seen[k] || c.peer === Store.me.login) return;
+                    seen[k] = 1;
                     cand.push(c.peer);
                 });
 
                 if (cand.length) {
                     box.appendChild(this._peopleSection('可能认识', cand, false));
-                } else if (!following.length) {
+                } else if (!following.length && !rel.length) {
                     box.innerHTML = '<div class="moments-empty">' +
-                        '<p>还没有关注任何人</p>' +
-                        '<p class="sub">搜个用户名试试，关注后 TA 的动态会出现在朋友圈</p></div>';
+                        '<p>还没有关系和关注</p>' +
+                        '<p class="sub">有私聊或群聊后，动态会自动出现；也可以搜用户名关注</p></div>';
                 }
             } catch (e) {
                 box.innerHTML = '<div class="moments-empty">加载失败：' + (e.message || e) + '</div>';
@@ -2071,7 +2144,11 @@
             return wrap;
         },
 
-        _personRow(login, canUnfollow) {
+        /**
+         * @param {boolean} canUnfollow 已关注 → 显示"已关注"
+         * @param {boolean} fromRel 来自聊天关系 → 不显示关注按钮（本来就自动可见）
+         */
+        _personRow(login, canUnfollow, fromRel) {
             var self = this;
             var row = document.createElement('div');
             row.className = 'disc-row';
@@ -2091,6 +2168,15 @@
             nm.textContent = login;
             info.appendChild(nm);
             row.appendChild(info);
+
+            if (fromRel) {
+                // 关系来的：自动可见，不再提供关注按钮（关注了也是重复）
+                var tag = document.createElement('span');
+                tag.className = 'disc-tag';
+                tag.textContent = '自动可见';
+                row.appendChild(tag);
+                return row;
+            }
 
             var btn = document.createElement('button');
             btn.className = 'btn-primary btn-sm' + (canUnfollow ? ' btn-ghost' : '');
@@ -2744,19 +2830,26 @@
                     self.toast('操作失败：' + (e.message || e), true);
                 } finally { lb.disabled = false; }
             };
-            cm.onclick = function () {
-                var text = global.prompt('写评论：');
+            /**
+             * 发评论
+             * @param {string|null} replyTo 回复谁（null = 评论帖子本身）
+             */
+            var doComment = function (replyTo) {
+                var tip = replyTo ? ('回复 ' + replyTo + '：') : '写评论：';
+                var text = global.prompt(tip);
                 if (!text || !text.trim()) return;
                 Moments.comment(post.author, post.id, myLogin,
-                    Store.me.avatar_url, text.trim())
+                    Store.me.avatar_url, text.trim(), replyTo)
                     .then(function () {
-                        self.toast('已评论');
+                        self.toast(replyTo ? ('已回复 ' + replyTo) : '已评论');
                         self.refreshMomentComments(post, cbox);
                     })
                     .catch(function (e) {
                         self.toast('评论失败：' + (e.message || e), true);
                     });
             };
+
+            cm.onclick = function () { doComment(null); };
 
             acts.appendChild(lb);
             acts.appendChild(cm);
@@ -2836,25 +2929,68 @@
                 if (!cs.length) { box.style.display = 'none'; return; }
                 box.style.display = '';
                 box.innerHTML = '';
+                var self2 = this;
                 cs.forEach(function (c) {
                     var row = document.createElement('div');
                     row.className = 'moment-comment';
+
                     var who = document.createElement('span');
                     who.className = 'moment-cname';
                     who.textContent = c.login;
-                    var tx = document.createElement('span');
-                    tx.textContent = c.text;
                     row.appendChild(who);
+
+                    // 回复链：A 回复 B 时，把 B 的名字带上
                     if (c.replyTo) {
                         var rp = document.createElement('span');
                         rp.className = 'moment-creply';
-                        rp.textContent = '回复 ' + c.replyTo + '：';
+                        rp.textContent = '回复';
                         row.appendChild(rp);
+                        var rn = document.createElement('span');
+                        rn.className = 'moment-cname';
+                        rn.textContent = c.replyTo;
+                        row.appendChild(rn);
                     }
+
+                    var tx = document.createElement('span');
+                    tx.textContent = '：' + c.text;
                     row.appendChild(tx);
+
+                    // ★ 点评论 = 回复这个人
+                    // 自己的评论不给自己回复（没意义）
+                    var isMine = String(c.login).toLowerCase() ===
+                        String((Store.me && Store.me.login) || '').toLowerCase();
+                    if (!isMine) {
+                        row.classList.add('tappable');
+                        row.title = '回复 ' + c.login;
+                        row.onclick = function () {
+                            if (self2.commentOn) self2.commentOn(post, c.login, cbox);
+                        };
+                    }
+
                     box.appendChild(row);
                 });
             } catch (e) { /* 忽略 */ }
+        },
+
+        /**
+         * 回复某条评论（由评论行点击触发）
+         * 之所以挂在 this 上：评论行是在 refreshMomentComments 里建的，
+         * 拿不到闭包里的 doComment，只能通过实例方法回调。
+         */
+        commentOn(post, who, cbox) {
+            var self = this;
+            var myLogin = Store.me.login;
+            var text = global.prompt('回复 ' + who + '：');
+            if (!text || !text.trim()) return;
+            Moments.comment(post.author, post.id, myLogin,
+                Store.me.avatar_url, text.trim(), who)
+                .then(function () {
+                    self.toast('已回复 ' + who);
+                    self.refreshMomentComments(post, cbox);
+                })
+                .catch(function (e) {
+                    self.toast('回复失败：' + (e.message || e), true);
+                });
         },
 
         /** 朋友圈图片全屏预览 */
