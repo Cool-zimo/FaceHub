@@ -890,6 +890,8 @@ video.att-player { height: auto; max-height: 260px; }
 .moments-pane {
     display: flex; flex-direction: column;
     background: #fff; overflow: hidden;
+    height: 100vh; height: 100dvh;   /* 顶层元素，得自己撑满 */
+    max-width: 680px; margin: 0 auto;
 }
 .moments-head {
     display: flex; align-items: center; gap: 10px;
