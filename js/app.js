@@ -2998,21 +2998,112 @@
             };
             /**
              * 发评论
+             *
+             * ★ 之前是 prompt()，只能打字。
+             *   微信的评论是能发图的，所以改成帖内展开的输入栏：
+             *   文字 + 选图 + 发送，跟微信一致。
+             *
              * @param {string|null} replyTo 回复谁（null = 评论帖子本身）
              */
             var doComment = function (replyTo) {
-                var tip = replyTo ? ('回复 ' + replyTo + '：') : '写评论：';
-                var text = global.prompt(tip);
-                if (!text || !text.trim()) return;
-                Moments.comment(post.author, post.id, myLogin,
-                    Store.me.avatar_url, text.trim(), replyTo)
-                    .then(function () {
-                        self.toast(replyTo ? ('已回复 ' + replyTo) : '已评论');
-                        self.refreshMomentComments(post, cbox);
-                    })
-                    .catch(function (e) {
-                        self.toast('评论失败：' + (e.message || e), true);
+                // 已展开就收起（再点一次=取消），再点别人会切换对象
+                var old = el.querySelector('.moment-cinput');
+                if (old) { old.remove(); return; }
+
+                var bar = document.createElement('div');
+                bar.className = 'moment-cinput';
+
+                var ta = document.createElement('input');
+                ta.type = 'text';
+                ta.className = 'moment-cinput-text';
+                ta.placeholder = replyTo ? ('回复 ' + replyTo + '…') : '写评论…';
+                ta.maxLength = 500;
+                bar.appendChild(ta);
+
+                var pic = document.createElement('button');
+                pic.className = 'moment-cinput-pic';
+                pic.title = '配图（最多 3 张）';
+                pic.innerHTML = global.Icons ? Icons.image(16) : '🖼';
+                bar.appendChild(pic);
+
+                var send = document.createElement('button');
+                send.className = 'moment-cinput-send';
+                send.textContent = '发送';
+                bar.appendChild(send);
+
+                var picked = [];      // File[]
+                var thumbs = document.createElement('div');
+                thumbs.className = 'moment-cinput-thumbs';
+                bar.insertBefore(thumbs, send);
+
+                function renderThumbs() {
+                    thumbs.innerHTML = '';
+                    picked.forEach(function (f, i) {
+                        var cell = document.createElement('div');
+                        cell.className = 'moment-cthumb';
+                        var im = document.createElement('img');
+                        im.src = (global.URL && URL.createObjectURL)
+                            ? URL.createObjectURL(f) : '';
+                        cell.appendChild(im);
+                        var x = document.createElement('button');
+                        x.textContent = '✕';
+                        x.onclick = function () { picked.splice(i, 1); renderThumbs(); };
+                        cell.appendChild(x);
+                        thumbs.appendChild(cell);
                     });
+                }
+
+                pic.onclick = async function () {
+                    if (picked.length >= 3) {
+                        return self.toast('评论最多 3 张图', true);
+                    }
+                    try {
+                        var fs = await Attach.pick(false);
+                        if (!fs || !fs.length) return;
+                        var parts = Attach.partition(fs);
+                        if (parts.tooBig.length) {
+                            self.toast('「' + parts.tooBig[0].name + '」太大，已跳过', true);
+                        }
+                        var room = 3 - picked.length;
+                        parts.ok.slice(0, room).forEach(function (f) { picked.push(f); });
+                        if (parts.ok.length > room) {
+                            self.toast('评论最多 3 张图', true);
+                        }
+                        renderThumbs();
+                    } catch (e) {
+                        self.toast('选图失败：' + (e.message || e), true);
+                    }
+                };
+
+                var submit = function () {
+                    var text = (ta.value || '').trim();
+                    if (!text && !picked.length) {
+                        return self.toast('写点什么，或配张图', true);
+                    }
+                    send.disabled = true;
+                    send.textContent = picked.length ? '上传中…' : '发送中…';
+                    Moments.comment(post.author, post.id, myLogin,
+                        Store.me.avatar_url, text, replyTo, picked)
+                        .then(function () {
+                            self.toast(replyTo ? ('已回复 ' + replyTo) : '已评论');
+                            bar.remove();
+                            self.refreshMomentComments(post, cbox);
+                        })
+                        .catch(function (e) {
+                            self.toast('评论失败：' + (e.message || e), true);
+                            send.disabled = false;
+                            send.textContent = '发送';
+                        });
+                };
+
+                send.onclick = submit;
+                ta.onkeydown = function (e) {
+                    if (e.key === 'Enter') submit();
+                    if (e.key === 'Escape') bar.remove();
+                };
+
+                body.appendChild(bar);
+                setTimeout(function () { ta.focus(); }, 40);
             };
 
             cm.onclick = function () { doComment(null); };
@@ -3121,6 +3212,32 @@
                     tx.textContent = '：' + c.text;
                     row.appendChild(tx);
 
+                    // ★ 评论配图（微信评论也能发图）
+                    // 图在评论者自己的主页仓库，所以要用 c.login 取地址，
+                    // 用帖子作者的 login 会 404。
+                    if (c.imgs && c.imgs.length) {
+                        var gal = document.createElement('div');
+                        gal.className = 'moment-cimgs';
+                        c.imgs.forEach(function (im, ii) {
+                            var cell = document.createElement('img');
+                            cell.className = 'moment-cimg skeleton';
+                            cell.alt = im.n || '';
+                            cell.onload = function () {
+                                cell.classList.remove('skeleton');
+                            };
+                            // GIF 直接引原图就会动，绝不走 canvas 压缩
+                            Moments._commentImgUrl(c.login, im)
+                                .then(function (u) { cell.src = u; })
+                                .catch(function () { cell.alt = '图片加载失败'; });
+                            cell.onclick = function (e) {
+                                e.stopPropagation();
+                                self2.previewMomentImages(c.imgs, ii, c.login);
+                            };
+                            gal.appendChild(cell);
+                        });
+                        row.appendChild(gal);
+                    }
+
                     // ★ 点评论 = 回复这个人
                     // 自己的评论不给自己回复（没意义）
                     var isMine = String(c.login).toLowerCase() ===
@@ -3144,19 +3261,108 @@
          * 拿不到闭包里的 doComment，只能通过实例方法回调。
          */
         commentOn(post, who, cbox) {
+            // 复用帖子卡片里的输入栏（它在 el 内，靠 class 找）
+            var bar = cbox ? cbox.parentNode.querySelector('.moment-cinput') : null;
+            if (bar) { bar.remove(); }
+
             var self = this;
             var myLogin = Store.me.login;
-            var text = global.prompt('回复 ' + who + '：');
-            if (!text || !text.trim()) return;
-            Moments.comment(post.author, post.id, myLogin,
-                Store.me.avatar_url, text.trim(), who)
-                .then(function () {
-                    self.toast('已回复 ' + who);
-                    self.refreshMomentComments(post, cbox);
-                })
-                .catch(function (e) {
-                    self.toast('回复失败：' + (e.message || e), true);
-                });
+            var wrap = cbox ? cbox.parentNode : null;
+            if (!wrap) return;
+
+            var input = document.createElement('div');
+            input.className = 'moment-cinput';
+            var ta = document.createElement('input');
+            ta.type = 'text';
+            ta.className = 'moment-cinput-text';
+            ta.placeholder = '回复 ' + who + '…';
+            ta.maxLength = 500;
+            var send = document.createElement('button');
+            send.className = 'moment-cinput-send';
+            send.textContent = '发送';
+            input.appendChild(ta);
+            input.appendChild(send);
+
+            var submit = function () {
+                var text = (ta.value || '').trim();
+                if (!text) return;
+                send.disabled = true;
+                Moments.comment(post.author, post.id, myLogin,
+                    Store.me.avatar_url, text, who)
+                    .then(function () {
+                        self.toast('已回复 ' + who);
+                        input.remove();
+                        self.refreshMomentComments(post, cbox);
+                    })
+                    .catch(function (e) {
+                        self.toast('回复失败：' + (e.message || e), true);
+                        send.disabled = false;
+                    });
+            };
+            send.onclick = submit;
+            ta.onkeydown = function (e) {
+                if (e.key === 'Enter') submit();
+                if (e.key === 'Escape') input.remove();
+            };
+            wrap.appendChild(input);
+            setTimeout(function () { ta.focus(); }, 40);
+        },
+
+        /**
+         * 预览一组图片（帖子九宫格 / 评论配图共用）
+         *
+         * @param {Array} imgs  [{p,n,t,s}]
+         * @param {number} idx  从第几张开始
+         * @param {string} owner 图片所在仓库的归属（评论图是评论者）
+         */
+        previewMomentImages(imgs, idx, owner) {
+            if (!imgs || !imgs.length) return;
+            var self = this;
+            var cur = idx || 0;
+
+            var ov = document.createElement('div');
+            ov.className = 'att-overlay';
+            var box = document.createElement('div');
+            box.className = 'att-ov-box';
+
+            var close = document.createElement('button');
+            close.className = 'att-ov-close';
+            close.textContent = '✕';
+            close.onclick = function () {
+                if (ov.parentNode) ov.parentNode.removeChild(ov);
+            };
+            box.appendChild(close);
+
+            var img = document.createElement('img');
+            img.className = 'att-ov-img';
+            box.appendChild(img);
+
+            function show(i) {
+                cur = (i + imgs.length) % imgs.length;
+                Moments._commentImgUrl(owner, imgs[cur])
+                    .then(function (u) { img.src = u; });
+            }
+
+            if (imgs.length > 1) {
+                var nav = document.createElement('div');
+                nav.className = 'att-ov-nav';
+                var prev = document.createElement('button');
+                prev.textContent = '‹';
+                prev.onclick = function (e) { e.stopPropagation(); show(cur - 1); };
+                var next = document.createElement('button');
+                next.textContent = '›';
+                next.onclick = function (e) { e.stopPropagation(); show(cur + 1); };
+                nav.appendChild(prev); nav.appendChild(next);
+                box.appendChild(nav);
+            }
+
+            ov.appendChild(box);
+            ov.onclick = function () {
+                if (ov.parentNode) ov.parentNode.removeChild(ov);
+            };
+            box.onclick = function (e) { e.stopPropagation(); };
+            document.body.appendChild(ov);
+            show(cur);
         },
 
         /** 朋友圈图片全屏预览 */
