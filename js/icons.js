@@ -44,6 +44,13 @@
                 '<path d="M4.9 4.9a10 10 0 0 0 0 14.2"/>' +
                 '<path d="M19.1 19.1a10 10 0 0 0 0-14.2"/>', s || 22, { sw: 1.7 });
         },
+        // 小程序：九宫格
+        grid: function (s) {
+            return svg('<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/>' +
+                '<rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/>' +
+                '<rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/>' +
+                '<rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>', s || 22, { sw: 1.7 });
+        },
         // 点赞：心形
         heart: function (s) {
             return svg('<path d="M12 20s-7-4.5-7-9.5A3.8 3.8 0 0 1 12 7.6 3.8 3.8 0 0 1 19 10.5c0 5-7 9.5-7 9.5z"/>', s || 14, { sw: 1.7 });
