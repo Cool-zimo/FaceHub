@@ -20,12 +20,39 @@
 
 var Attach = {
 
-    // 单文件上限。GitHub 理论 100MB，但 base64 上传体验和限流都撑不住。
-    MAX_SIZE: 10 * 1024 * 1024,
     // 图片压缩阈值：小于这个就不折腾了，直接传
     COMPRESS_OVER: 200 * 1024,
     MAX_EDGE: 1600,
     JPEG_QUALITY: 0.85,
+
+    /**
+     * 单片大小 2MB
+     *
+     * 实测 contents API 的可用上限（不是官方说的 100MB）：
+     *   1MB ✓ 7.8s   10MB ✓ 9.3s   15MB ✓ 11.3s   25MB ✓ 12.8s
+     *   40MB ✗ 422 "file is too large to be processed"
+     * 所以单次 PUT 的安全线在 30MB 左右。
+     *
+     * 但分片的价值不只是"突破上限"：
+     *   10MB 一次请求要 9.3 秒，中途网络抖一下全废；
+     *   切成 2MB 五片，每片约 2 秒，失败只重传那一片。
+     * 单片太大 = 重试代价太高，所以取 2MB（base64 后 2.7MB，很稳）。
+     */
+    CHUNK: 2 * 1024 * 1024,
+
+    /** 超过这个大小才分片（小文件不值得多花几个 commit） */
+    SPLIT_AT: 4 * 1024 * 1024,
+
+    /** 并发路数。内容创建限流 80/分钟，开太大会 403 */
+    CONCURRENCY: 3,
+
+    /**
+     * 总大小上限 200MB
+     *
+     * 不是技术限制，是耐心限制：2MB 一片要 100 片，
+     * 按每片 2 秒、3 路并发算也要一分多钟。
+     */
+    MAX_SIZE: 200 * 1024 * 1024,
 
     // ── 选择 ─────────────────────────────────────────────
     pick(multiple) {
@@ -147,6 +174,12 @@ var Attach = {
         var ready = await this.compressImage(file);
 
         if (onProgress) onProgress('uploading', 0);
+
+        // 大文件走分片，小文件单片直传
+        if (ready.size > this.SPLIT_AT) {
+            return await this._uploadChunked(owner, repo, ready, file, onProgress);
+        }
+
         var dataUrl = await this._readAsDataURL(ready);
         var b64 = dataUrl.split(',')[1] || '';
 
@@ -164,22 +197,196 @@ var Attach = {
             type: ready.type || file.type || 'application/octet-stream',
             size: ready.size,
             path: path,
+            chunks: 1,
             dataUrl: dataUrl,
             compressed: !!ready.__compressed,
             origSize: ready.__origSize || ready.size
         };
     },
 
+    // ── 分片上传 ─────────────────────────────────────────
+
+    /**
+     * 分片上传
+     *
+     * 借鉴 github_drive 的做法：切成固定大小的片，每片独立 PUT。
+     * 但有两点不同：
+     *   1. drive 把分片信息存 chunks[] 数组，FaceHub 只存「目录 + 片数」
+     *      —— 信封要塞进 issue 评论（上限 65536 字符），
+     *      100 个分片的路径数组会撑爆它。路径可推导，不存。
+     *   2. drive 对 >1MB 的片走 Git Blob API（三步），这里统一 base64
+     *      —— 既然都切到 2MB 了，一步到位的 contents API 更不容易出错。
+     */
+    async _uploadChunked(owner, repo, ready, file, onProgress) {
+        var self = this;
+        var total = ready.size;
+        var totalChunks = Math.ceil(total / this.CHUNK);
+
+        // 片存在「目录/」下，片文件名就是序号
+        var dir = this._path(ready) + '/';
+        var uploaded = [];
+
+        if (onProgress) onProgress('uploading', 0, totalChunks);
+
+        var done = 0;
+        var failed = null;
+
+        // 读一次全量 buffer，之后按偏移切片（避免反复读文件）
+        var buf = await ready.arrayBuffer();
+        var all = new Uint8Array(buf);
+
+        /**
+         * 串行上传 —— 这里不能并发。
+         *
+         * ★ 踩过的坑：一开始写成了并发池，结果第 3 片直接失败：
+         *     "is at 486a… but expected 2f23…"
+         *   因为 contents API 每次提交都基于当前 HEAD，并发时
+         *   前一片刚把 HEAD 改了，后一片的 parent 就对不上了。
+         *   Git 的提交模型决定了同一个仓库只能串行写。
+         *
+         *   （github_drive 的分片也是串行的 for 循环，我改并发是改错了方向。）
+         *
+         * 单次失败会重试一次：偶发的 HEAD 冲突、网络抖动能自愈。
+         */
+        for (var i = 0; i < totalChunks; i++) {
+            var start = i * self.CHUNK;
+            var end = Math.min(start + self.CHUNK, total);
+            var piece = all.subarray(start, end);
+            var b64 = self._u8ToB64(piece);
+            var piecePath = dir + i;
+
+            var lastErr = null;
+            for (var attempt = 0; attempt < 2; attempt++) {
+                try {
+                    await global.API.writeFile(owner, repo, piecePath, b64,
+                        '附件分片 ' + (i + 1) + '/' + totalChunks + '：' + (file.name || 'file'),
+                        null, 'main', true);
+                    lastErr = null;
+                    break;
+                } catch (e) {
+                    lastErr = e;
+                    // 重试前稍等，给 GitHub 一点收敛时间
+                    await new Promise(function (r) { setTimeout(r, 600); });
+                }
+            }
+
+            if (lastErr) {
+                await this._cleanupChunks(owner, repo, uploaded);
+                throw new Error('上传失败（第 ' + (i + 1) + '/' + totalChunks +
+                    ' 片）：' + (lastErr.message || lastErr));
+            }
+
+            uploaded.push(piecePath);
+            done++;
+            if (onProgress) onProgress('uploading', done / totalChunks, totalChunks);
+        }
+
+        if (onProgress) onProgress('done', 1, totalChunks);
+
+        return {
+            name: file.name || '附件',
+            type: ready.type || file.type || 'application/octet-stream',
+            size: total,
+            path: dir,              // 多片时 path 是目录，片 = dir + 序号
+            chunks: totalChunks,
+            compressed: !!ready.__compressed,
+            origSize: ready.__origSize || total
+        };
+    },
+
+    /** 清理上传失败的分片（best effort，单个失败不影响其他） */
+    async _cleanupChunks(owner, repo, paths) {
+        for (var i = 0; i < paths.length; i++) {
+            try {
+                var sha = await global.API.sha(owner, repo, paths[i], 'main');
+                if (!sha) continue;
+                await global.API.req(
+                    '/repos/' + owner + '/' + repo + '/contents/' + paths[i],
+                    { method: 'DELETE', body: { message: '清理失败的分片', sha: sha, branch: 'main' } });
+            } catch (e) { /* 忽略 */ }
+        }
+    },
+
+    /** Uint8Array → base64（分块处理，避免 apply 参数上限爆栈） */
+    _u8ToB64(u8) {
+        var CH = 8192;
+        var bin = '';
+        for (var i = 0; i < u8.length; i += CH) {
+            bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+        }
+        return global.btoa(bin);
+    },
+
+    /** base64 → Uint8Array */
+    _b64ToU8(b64) {
+        var bin = global.atob(b64);
+        var u8 = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return u8;
+    },
+
+    /**
+     * 读取附件字节（自动处理单片 / 多片）
+     * 多片按序拼接 —— 序号就是顺序，不能乱序并发后直接拼
+     */
+    async readBytes(att, ctx) {
+        var owner = ctx.owner, repo = ctx.repo;
+        var n = att.c || 1;
+
+        // 单片：优先 contents API（能拿 ETag，二次免费）；
+        // 返回空说明文件 >1MB（contents 不给 content），退 Git Blob API
+        if (n <= 1) {
+            var one = await global.API.readFile(owner, repo, att.p, 'main', false, true);
+            if (one) return this._b64ToU8(one);
+            var big = await global.API.readLargeFileB64(owner, repo, att.p, 'main');
+            return this._b64ToU8(big);
+        }
+
+        var self = this;
+        var parts = new Array(n);
+
+        /**
+         * 并发拉取但按序号归位 —— 拼的时候才不会错乱。
+         * （上传必须串行，因为写同一个 Git 仓库会撞 HEAD；
+         *   读取没有这个限制，可以并发。）
+         */
+        var cursor = 0;
+        async function worker() {
+            while (true) {
+                var i = cursor++;
+                if (i >= n) return;
+                // 分片固定 2MB，contents API 读不了，走 Git Blob API
+                var b = await global.API.readLargeFileB64(owner, repo, att.p + i, 'main');
+                parts[i] = self._b64ToU8(b);
+            }
+        }
+        var ws = [];
+        var wn = Math.min(this.CONCURRENCY, n);
+        for (var w = 0; w < wn; w++) ws.push(worker());
+        await Promise.all(ws);
+
+        var len = 0;
+        for (var i = 0; i < n; i++) len += parts[i].length;
+        var out = new Uint8Array(len);
+        var off = 0;
+        for (var j = 0; j < n; j++) { out.set(parts[j], off); off += parts[j].length; }
+        return out;
+    },
+
     // ── 信封 ─────────────────────────────────────────────
     PREFIX: 'FHATT1:',
 
+    /**
+     * 编码成信封
+     *
+     * c = 分片数。不存 chunks[] 数组 —— 信封要塞进 issue 评论
+     * （上限 65536 字符），几十上百个路径会撑爆它。
+     * 路径可推导（p + 序号），所以只存数量。
+     */
     encode(att) {
-        return this.PREFIX + JSON.stringify({
-            n: att.name,
-            t: att.type,
-            s: att.size,
-            p: att.path
-        });
+        var o = { n: att.name, t: att.type, s: att.size, p: att.path };
+        if (att.chunks && att.chunks > 1) o.c = att.chunks;
+        return this.PREFIX + JSON.stringify(o);
     },
 
     /** 解析附件消息；不是附件返回 null */
@@ -241,17 +448,39 @@ var Attach = {
     },
 
     // ── 读取附件内容 ─────────────────────────────────────
-    /** 从仓库读回 base64（懒加载用，带内存缓存避免重复请求） */
-    async dataUrl(owner, repo, path) {
-        var ck = 'fh:att:' + owner + '/' + repo + '/' + path;
-        var hit = this._mem && this._mem[ck];
-        if (hit) return hit;
+    /**
+     * 取可显示地址（懒加载用，带内存缓存避免重复请求）
+     *
+     * @param {object|string} att 附件信封；传字符串则视为单片（兼容老调用）
+     *
+     * 单片 → data: URL（小文件，省事）
+     * 多片 → 组装成 Blob 再 createObjectURL。
+     *   多片时必须组装，不能用 raw CDN 直链 —— 那是多个文件，
+     *   不是一个。而且大文件用 Blob URL 比 base64 字符串省内存。
+     */
+    async dataUrl(owner, repo, att) {
+        if (typeof att === 'string') att = { p: att, c: 1 };
 
-        var b64 = await global.API.readFile(owner, repo, path, 'main', false, true);
-        // 已经带 data: 前缀就直接用
-        var url = (b64.indexOf('data:') === 0)
-            ? b64
-            : 'data:application/octet-stream;base64,' + b64;
+        var n = att.c || 1;
+        var ck = 'fh:att:' + owner + '/' + repo + '/' + att.p + '#' + n;
+        if (this._mem && this._mem[ck]) return this._mem[ck];
+
+        var url;
+        if (n > 1) {
+            var u8 = await this.readBytes(att, { owner: owner, repo: repo });
+            var blob = new global.Blob([u8], {
+                type: att.t || 'application/octet-stream'
+            });
+            url = global.URL.createObjectURL(blob);
+        } else {
+            var b64 = await global.API.readFile(owner, repo, att.p, 'main', false, true);
+            if (!b64) throw new Error('附件内容为空');
+            // 已经带 data: 前缀就直接用
+            url = (b64.indexOf('data:') === 0)
+                ? b64
+                : 'data:' + (att.t || 'application/octet-stream') + ';base64,' + b64;
+        }
+
         if (!this._mem) this._mem = {};
         this._mem[ck] = url;
         return url;
@@ -283,7 +512,15 @@ var Attach = {
             b64 = att.dataUrl.split(',')[1] || null;
         }
         if (!b64) {
-            b64 = await global.API.readFile(att.owner, att.repo, rel, 'main', false, true);
+            // 多片要先组装。Drive 自己也会分片，但那是它内部的事，
+            // 我们这边只需要把完整内容交给它。
+            var n = att.c || 1;
+            if (n > 1) {
+                var u8 = await this.readBytes(att, { owner: att.owner, repo: att.repo });
+                b64 = this._u8ToB64(u8);
+            } else {
+                b64 = await global.API.readFile(att.owner, att.repo, rel, 'main', false, true);
+            }
         }
         if (!b64) throw new Error('附件内容为空');
 
@@ -462,7 +699,7 @@ var Attach = {
 
     _lazyLoad(img, att, ctx) {
         var self = this;
-        this.dataUrl(ctx.owner, ctx.repo, att.p).then(function (url) {
+        this.dataUrl(ctx.owner, ctx.repo, att).then(function (url) {
             img.src = url;
         }).catch(function () {
             img.alt = '加载失败';
@@ -474,7 +711,7 @@ var Attach = {
         var kind = this.kind(att);
         try {
             cover.querySelector('.att-sub').textContent = '加载中…';
-            var url = att.dataUrl || await this.dataUrl(ctx.owner, ctx.repo, att.p);
+            var url = att.dataUrl || await this.dataUrl(ctx.owner, ctx.repo, att);
             el.innerHTML = '';
             var m = document.createElement(kind === 'video' ? 'video' : 'audio');
             m.className = 'att-player';
@@ -508,7 +745,7 @@ var Attach = {
 
         var load = (att.dataUrl
             ? Promise.resolve(att.dataUrl)
-            : this.dataUrl(ctx.owner, ctx.repo, att.p));
+            : this.dataUrl(ctx.owner, ctx.repo, att));
 
         load.then(function (url) {
             var kind = self.kind(att);
@@ -554,7 +791,7 @@ var Attach = {
         try {
             var url = knownUrl ||
                 att.dataUrl ||
-                await this.dataUrl(ctx.owner, ctx.repo, att.p);
+                await this.dataUrl(ctx.owner, ctx.repo, att);
             var a = document.createElement('a');
             a.href = url;
             a.download = att.n || 'file';
