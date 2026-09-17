@@ -1183,3 +1183,163 @@ video.att-player { height: auto; max-height: 260px; }
     flex-shrink: 0; font-size: 11px; color: #07C160;
     background: rgba(7, 193, 96, .1); padding: 3px 8px; border-radius: 3px;
 }
+
+/* ═══ 右侧内容区（微信布局：导航+会话列表常驻，右侧切换） ═══ */
+.content-col {
+    position: relative;
+    min-width: 0;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    background: #f5f5f5;
+}
+.content-col > .chat-pane { flex: 1; min-width: 0; min-height: 0; }
+
+/**
+ * 面板浮在聊天区之上（不是全屏盖住整个 app）
+ * 这样左侧导航和会话列表始终可见 —— 跟微信一致
+ */
+.pane-full {
+    position: absolute; inset: 0; z-index: 6;
+    display: flex; flex-direction: column;
+    background: #ededed; overflow: hidden;
+    animation: paneIn var(--dur) var(--ease) both;
+}
+@keyframes paneIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* 面板头部（统一：关闭 / 标题 / 右侧操作） */
+.moments-head {
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+    height: 48px; padding: 0 12px; flex-shrink: 0;
+    background: #ededed; border-bottom: 1px solid #e0e0e0;
+}
+.moments-title {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    font-size: 15.5px; font-weight: 500; color: #111;
+}
+.pane-close, .pane-back {
+    width: 30px; height: 30px; border: 0; border-radius: 50%;
+    background: rgba(0,0,0,.05); color: #555;
+    font-size: 15px; line-height: 1; display: flex;
+    align-items: center; justify-content: center;
+    transition: background var(--dur-fast) ease, transform var(--dur-fast) var(--ease);
+}
+.pane-close:hover, .pane-back:hover { background: rgba(0,0,0,.12); }
+.pane-close:active, .pane-back:active { transform: scale(.9); }
+.moments-head .btn-primary { margin-left: auto; }
+
+/* 面板本体不再是全屏高度 */
+.pane-full.moments-pane,
+.pane-full.apps-pane,
+.pane-full.me-pane,
+.pane-full.discover-pane,
+.pane-full.profile-pane {
+    height: auto; max-width: none; margin: 0;
+}
+
+/* 朋友圈封面（微信风格） */
+.moments-cover {
+    position: relative; height: 150px; flex-shrink: 0;
+    background: linear-gradient(135deg, #4a4a4a, #2b2b2b);
+    overflow: hidden;
+}
+.moments-cover-img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover;
+}
+.moments-cover-fallback {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,.28); font-size: 22px; font-weight: 600;
+    letter-spacing: 4px;
+}
+.moments-camera {
+    position: absolute; right: 14px; bottom: -18px;
+    width: 40px; height: 40px; border: 0; border-radius: 8px;
+    background: #fff; color: #333; font-size: 18px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.18);
+    transition: transform var(--dur-fast) var(--ease);
+}
+.moments-camera:hover { transform: scale(1.06); }
+.moments-camera:active { transform: scale(.94); }
+
+
+/* ═══ 发朋友圈（微信风格编辑页） ═══════════════════════════ */
+.composer-pane { background: #ededed; z-index: 8; }
+
+.composer-head {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 48px; padding: 0 14px; flex-shrink: 0;
+    background: #ededed; border-bottom: 1px solid #e0e0e0;
+}
+.composer-cancel {
+    border: 0; background: none; color: #333; font-size: 15px; padding: 6px 4px;
+}
+.composer-cancel:active { opacity: .5; }
+.composer-send {
+    border: 0; border-radius: 5px; padding: 7px 16px;
+    background: var(--brand); color: #fff; font-size: 14.5px; font-weight: 500;
+    transition: opacity var(--dur-fast) ease, transform var(--dur-fast) var(--ease);
+}
+.composer-send:hover { opacity: .9; }
+.composer-send:active { transform: scale(.96); }
+.composer-send:disabled { background: #b5e5c8; cursor: default; }
+
+.composer-body { flex: 1; overflow-y: auto; min-height: 0; padding: 0 0 24px; }
+
+.composer-text {
+    display: block; width: 100%; min-height: 110px;
+    padding: 14px 16px; border: 0; outline: none; resize: none;
+    font-size: 15.5px; line-height: 1.6; color: #111;
+    background: #fff; font-family: inherit;
+}
+.composer-text::placeholder { color: #c2c2c2; }
+
+.composer-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 5px; padding: 12px 16px; background: #fff;
+}
+.cmp-cell {
+    position: relative; aspect-ratio: 1; border-radius: 4px; overflow: hidden;
+    background: #f0f0f0;
+}
+.cmp-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cmp-del {
+    position: absolute; top: 3px; right: 3px;
+    width: 20px; height: 20px; border: 0; border-radius: 50%;
+    background: rgba(0,0,0,.5); color: #fff; font-size: 11px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+}
+.cmp-add {
+    aspect-ratio: 1; border: 1px dashed #d4d4d4; border-radius: 4px;
+    background: #fafafa; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+    transition: background var(--dur-fast) ease;
+}
+.cmp-add:hover { background: #f2f2f2; }
+.cmp-add:active { background: #ececec; }
+.cmp-plus { font-size: 26px; color: #c4c4c4; line-height: 1; }
+.cmp-add-n { font-size: 11px; color: #c4c4c4; }
+
+.composer-rows { margin-top: 12px; background: #fff; }
+.composer-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 16px; border-bottom: 1px solid #f4f4f4;
+    font-size: 15px; color: #111;
+}
+.composer-row:last-child { border-bottom: 0; }
+.composer-row-v { color: #9a9a9a; font-size: 14px; }
+
+/* 登录/欢迎 logo 改成图片后要重新定尺寸 */
+.login-logo {
+    width: 72px; height: 72px; border-radius: 16px;
+    object-fit: cover; margin: 0 auto 10px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.12);
+}
+.welcome-logo {
+    width: 56px; height: 56px; border-radius: 12px;
+    object-fit: cover; opacity: .5; margin-bottom: 10px;
+}
