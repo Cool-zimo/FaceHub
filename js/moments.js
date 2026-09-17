@@ -191,9 +191,116 @@
             return next;
         },
 
+        // ── 关系网（自动派生关注） ───────────────────────
+        /**
+         * 从聊天关系里派生"该看到谁的动态"
+         *
+         * ★ 为什么要有这个：
+         *   手动关注在熟人场景里是多余的 —— 都已经在聊天了，
+         *   凭什么还要再点一次"关注"才能看到朋友圈？
+         *   微信也没有"关注好友"这个动作。
+         *
+         * 关系来源：
+         *   ① 私聊对象（fbdm- 仓库的 peer）
+         *   ② 群成员（fhgrp- 仓库 group.json 的 members[]）
+         *
+         * 性能：group.json 要逐个读，所以结果缓存 10 分钟。
+         * 会话列表本身有 ETag，不会每次都花钱。
+         */
+        REL_CACHE_MS: 10 * 60 * 1000,
+        REL_MAX: 30,          // 关系再多也只取前 30 人，控制请求数
+
+        async relations(login) {
+            var self = this;
+            var ck = 'fh:rel:' + login;
+            var cached = null;
+            try {
+                var raw = global.localStorage.getItem(ck);
+                if (raw) {
+                    var d = JSON.parse(raw);
+                    if (d && (Date.now() - d.ts) < this.REL_CACHE_MS) {
+                        return d.list;
+                    }
+                    cached = d;      // 过期了但先留着，失败时兜底
+                }
+            } catch (e) { /* 忽略 */ }
+
+            var out = [];
+            var seen = {};
+            seen[String(login).toLowerCase()] = 1;
+
+            try {
+                var rooms = await global.Chat.listRooms();
+                if (!rooms.length) throw new Error('no rooms');
+
+                var peers = [];
+                var groups = [];
+                rooms.forEach(function (r) {
+                    // 用 Group.isGroup 判断，别自己猜前缀
+                    var isGrp = global.Group && global.Group.isGroup &&
+                        global.Group.isGroup(r.name);
+                    if (isGrp) {
+                        groups.push(r);
+                    } else if (r.peer) {
+                        peers.push(r.peer);
+                    }
+                });
+
+                peers.forEach(function (p) {
+                    var k = String(p).toLowerCase();
+                    if (!seen[k]) { seen[k] = 1; out.push(p); }
+                });
+
+                // 群成员：并发读 group.json（读操作没有 HEAD 冲突）
+                var metas = await Promise.all(groups.map(function (g) {
+                    return global.Group.meta(g.owner, g.name).catch(function () { return null; });
+                }));
+                metas.forEach(function (m) {
+                    (m && m.members || []).forEach(function (u) {
+                        var k = String(u).toLowerCase();
+                        if (!seen[k]) { seen[k] = 1; out.push(u); }
+                    });
+                });
+
+            } catch (e) {
+                // 拿不到就退回缓存，再不行就是空 —— 不能因此让朋友圈打不开
+                if (cached && cached.list) return cached.list;
+                return [];
+            }
+
+            out = out.slice(0, this.REL_MAX);
+
+            try {
+                global.localStorage.setItem(ck,
+                    JSON.stringify({ ts: Date.now(), list: out }));
+            } catch (e) { /* 配额满就算了 */ }
+
+            return out;
+        },
+
+        /** 手动关注 + 自动关系的并集 */
+        async audience(login) {
+            var manual = await this.following(login);
+            var rel = await this.relations(login);
+            var seen = {}, out = [];
+            manual.concat(rel).forEach(function (u) {
+                var k = String(u).toLowerCase();
+                if (seen[k]) return;
+                seen[k] = 1;
+                out.push(u);
+            });
+            return out;
+        },
+
+        /** 关系变了（加了群/新会话）就调一次 */
+        invalidateRelations(login) {
+            try { global.localStorage.removeItem('fh:rel:' + login); }
+            catch (e) { /* 忽略 */ }
+        },
+
         // ── 时间线 ───────────────────────────────────────
         /**
-         * 聚合时间线（自己 + 关注的人）
+         * 聚合时间线（自己 + 关注的人 + 有聊天关系的）
          *
          * 请求数只与"关注人数"线性相关，与总帖数无关：
          * 每人一次 tree（带 ETag，二次免费）。
@@ -202,7 +309,8 @@
          */
         async timeline(login, limit) {
             var self = this;
-            var people = [login].concat(await this.following(login));
+            // 自己 + 手动关注 + 聊天关系（默认全都要）
+            var people = [login].concat(await this.audience(login));
             var max = limit || this.PAGE;
 
             var lists = await Promise.all(people.map(function (p) {
