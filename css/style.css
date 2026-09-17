@@ -1169,3 +1169,17 @@ video.att-player { height: auto; max-height: 260px; }
     background: #f2f2f2; color: #666; box-shadow: none;
 }
 .btn-ghost:hover { background: #e8e8e8; }
+
+/* 评论：可点击回复 */
+.moment-comment.tappable { cursor: pointer; }
+.moment-comment.tappable:hover { background: #f0f0f0; }
+.moment-comment.tappable:active { background: #e8e8e8; }
+
+/* 发现页：关系来源标记 */
+.disc-tip {
+    padding: 0 18px 8px; font-size: 11.5px; color: #a8a8a8; line-height: 1.5;
+}
+.disc-tag {
+    flex-shrink: 0; font-size: 11px; color: #07C160;
+    background: rgba(7, 193, 96, .1); padding: 3px 8px; border-radius: 3px;
+}
