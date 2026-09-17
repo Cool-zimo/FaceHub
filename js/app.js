@@ -95,6 +95,53 @@
         },
 
         // ── 启动 ───────────────────────────────────────────────
+        /**
+         * 本地缓存：上次会话列表 / 消息
+         *
+         * 用户抱怨"退一下标签页回来就要重新刷新"——
+         * 因为每次 visibilitychange 都重拉，界面先空一下再填。
+         * 现在先渲染本地快照（0 请求、0 延迟），后台静默更新，
+         * 有变化才重绘。切标签页时只要没变化就完全不动。
+         */
+        _snapKey() {
+            var me = (Store.me && Store.me.login) || '';
+            return 'fh:snap:' + me;
+        },
+
+        _saveSnapshot(convs) {
+            try {
+                global.localStorage.setItem(this._snapKey(),
+                    JSON.stringify({ ts: Date.now(), convs: convs }));
+            } catch (e) { /* 配额满 */ }
+        },
+
+        _loadSnapshot() {
+            try {
+                var raw = global.localStorage.getItem(this._snapKey());
+                if (!raw) return null;
+                var d = JSON.parse(raw);
+                return (d && Array.isArray(d.convs)) ? d.convs : null;
+            } catch (e) { return null; }
+        },
+
+        /**
+         * 静默刷新：拉到新数据才重绘，否则什么都不做
+         * 避免"切回标签页 → 列表闪一下"这种无意义重绘
+         */
+        async _refreshConvsQuiet() {
+            try {
+                var convs = await Chat.listConvs();
+                var sig = convs.map(function (c) {
+                    return c.name + ':' + (c.updated_at || '');
+                }).join('|');
+                if (sig === this._convSig) return;    // 没变，不动
+                this._convSig = sig;
+                this.convs = convs;
+                this._saveSnapshot(convs);
+                this.renderConvs();
+            } catch (e) { /* 失败就保持现状 */ }
+        },
+
         async boot() {
             var token = this.getToken();
             if (token) await this.enter(token);
@@ -301,6 +348,8 @@
                 self._momentsPage++;
                 self.loadMoments(true);
             };
+            var mb = document.getElementById('me-back');
+            if (mb) mb.onclick = function () { self.hideMe(); };
 
             // 图标：把 data-ico 占位渲染成内联 SVG
             self.mountIcons();
@@ -373,7 +422,9 @@
          */
         switchTab(tab) {
             if (tab === 'me') {
-                this.openKeyModal();
+                // 之前是弹窗，那么大空间只用来弹一个框，太浪费。
+                // 改成页面：头像 + 昵称 + 账号 + 常用入口。
+                this.showMe();
                 return;
             }
             this.view = (tab === 'contacts') ? 'contacts' : 'chats';
@@ -383,7 +434,15 @@
         // ── 会话列表 ───────────────────────────────────────────
         async loadConvs() {
             var list = document.getElementById('conv-list');
-            list.innerHTML = '<div class="loading">载入中…</div>';
+
+            // 先渲染本地快照：切回标签页时立刻有内容，不用等网络
+            var snap = this._loadSnapshot();
+            if (snap && snap.length && !this.convs.length) {
+                this.convs = snap;
+                this.renderConvs();
+            } else {
+                list.innerHTML = '<div class="loading">载入中…</div>';
+            }
 
             var convs = [];
 
@@ -420,6 +479,7 @@
             });
 
             this.convs = convs;
+            this._saveSnapshot(convs);
             this.renderConvs();
 
             // 待接受邀请
@@ -762,6 +822,8 @@
             this.e2eState = null;
             this._lastSig = null;        // 换会话，指纹必须重置
             this._seenIds = {};          // 已见 id 也重置，重开会话重新播一遍
+            this._pendingScroll = 0;
+            this._bindScrollSave();      // 滚动位置存起来
             this.markSeen(c, Date.now());
             document.getElementById('app').classList.add('show-chat');
 
@@ -934,6 +996,22 @@
             var wasAtBottom = (box.scrollHeight - box.scrollTop - box.clientHeight) < 80;
             var keepTop = box.scrollTop;
 
+            /**
+             * 恢复上次滚动位置
+             *
+             * 之前只在"同一次会话内重绘"时保留位置，
+             * 一刷新页面（或切走再回来）就跳回第一条 —— 翻历史的人很崩溃。
+             * 所以按会话 key 存 localStorage，下次进来原样滚回去。
+             */
+            var scrollKey = this._scrollKey();
+            if (keepTop === 0 && scrollKey) {
+                var saved = parseInt(global.localStorage.getItem(scrollKey), 10);
+                if (saved > 0) {
+                    this._pendingScroll = saved;
+                    wasAtBottom = false;
+                }
+            }
+
             if (!this._seenIds) this._seenIds = {};
             var seen = this._seenIds;
 
@@ -1043,8 +1121,23 @@
             });
 
             // 只在原本就贴着底部时才跟到底部；否则维持原位置
-            if (wasAtBottom) box.scrollTop = box.scrollHeight;
-            else box.scrollTop = keepTop;
+            if (wasAtBottom) {
+                box.scrollTop = box.scrollHeight;
+            } else if (this._pendingScroll) {
+                // 图片是异步加载的，高度会变，直接设不准 —— 分两次调
+                var want = this._pendingScroll;
+                this._pendingScroll = 0;
+                box.scrollTop = want;
+                setTimeout(function () {
+                    // 只修正，不覆盖用户这期间的主动滚动
+                    if (Math.abs(box.scrollTop - want) > 40 &&
+                        box.scrollTop < want) {
+                        box.scrollTop = want;
+                    }
+                }, 260);
+            } else {
+                box.scrollTop = keepTop;
+            }
         },
 
         // ── 发送 ───────────────────────────────────────────────
@@ -1182,20 +1275,29 @@
             this._rerenderWithPending();
 
             try {
-                var att = await Attach.upload(c.owner, c.name, file, function (stage) {
-                    if (stage === 'uploading') {
-                        temp.text = '正在上传 ' + file.name + '…';
-                        self._rerenderWithPending();
-                    }
-                });
+                var att = await Attach.upload(c.owner, c.name, file,
+                    function (stage, ratio, totalChunks) {
+                        if (stage === 'uploading') {
+                            // 分片上传有真实进度可显示，比干等着强
+                            var pct = Math.round((ratio || 0) * 100);
+                            temp.text = totalChunks && totalChunks > 1
+                                ? '正在上传 ' + file.name + '… ' + pct +
+                                  '%（' + Math.max(1, Math.ceil((ratio||0) * totalChunks)) +
+                                  '/' + totalChunks + ' 片）'
+                                : '正在上传 ' + file.name + '…';
+                            self._rerenderWithPending();
+                        }
+                    });
 
                 // 上传完：把占位换成真实附件气泡（本地 dataUrl，秒开）
                 temp.text = Attach.encode(att);
                 temp.raw = temp.text;
                 // 字段统一成信封格式（n/t/s/p），渲染时不用再判断来源
+                // c = 分片数，多片时 p 是目录
                 temp.att = {
                     n: att.name, t: att.type, s: att.size,
-                    p: att.path, dataUrl: att.dataUrl
+                    p: att.path, c: att.chunks || 1,
+                    dataUrl: att.dataUrl
                 };
 
                 // 发消息（走正常加密流程）
@@ -1853,6 +1955,122 @@
             void btn.offsetWidth;      // 强制 reflow
             btn.classList.add('just-sent');
             setTimeout(function () { btn.classList.remove('just-sent'); }, 400);
+        },
+
+        /** 「我」页面 */
+        showMe() {
+            var me = Store.me || {};
+            var pane = document.getElementById('me-pane');
+            var app = document.getElementById('app');
+            var mp = document.getElementById('moments-pane');
+            if (mp) mp.style.display = 'none';
+            if (app) app.style.display = 'none';
+            if (pane) pane.style.display = 'flex';
+
+            var av = document.getElementById('me-avatar');
+            if (av) {
+                av.src = me.avatar_url || ('https://github.com/' + me.login + '.png?size=160');
+                av.onerror = function () { av.style.visibility = 'hidden'; };
+            }
+            var nm = document.getElementById('me-name');
+            if (nm) nm.textContent = me.name || me.login || '';
+            var lg = document.getElementById('me-login');
+            if (lg) lg.textContent = me.login ? ('@' + me.login) : '';
+
+            this.renderMeEntries();
+            this.mountIcons();
+        },
+
+        hideMe() {
+            var pane = document.getElementById('me-pane');
+            var app = document.getElementById('app');
+            if (pane) pane.style.display = 'none';
+            if (app) app.style.display = '';
+        },
+
+        /** 「我」页面的入口列表 */
+        renderMeEntries() {
+            var box = document.getElementById('me-entries');
+            if (!box) return;
+            var self = this;
+            box.innerHTML = '';
+
+            var items = [
+                { ico: 'heart', txt: '密钥备份', sub: '换设备时用它恢复',
+                  fn: function () { self.openKeyModal(); } },
+                { ico: 'shield', txt: '安全码', sub: '线下核对，防密钥被换',
+                  fn: function () { self.openSafetyNumber(); } },
+                { ico: 'moments', txt: '我的朋友圈', sub: '看自己发过的动态',
+                  fn: function () { self.showMoments(); } },
+                { ico: 'refresh', txt: '刷新会话列表', sub: '手动重新拉取',
+                  fn: function () { self.loadConvs(); self.toast('已刷新'); } },
+                { ico: 'close', txt: '退出登录', sub: '清除本机令牌', danger: true,
+                  fn: function () {
+                      if (global.confirm('退出登录？本机令牌会被清除（GitHub 上的数据不受影响）。')) {
+                          Store.logout();
+                      }
+                  } }
+            ];
+
+            // 安全码入口可能不存在（旧版本），容错
+            if (typeof self.openSafetyNumber !== 'function') {
+                items = items.filter(function (x) { return x.txt !== '安全码'; });
+            }
+
+            items.forEach(function (it) {
+                var row = document.createElement('button');
+                row.className = 'me-entry' + (it.danger ? ' danger' : '');
+                var ic = document.createElement('span');
+                ic.className = 'me-entry-ico';
+                ic.setAttribute('data-ico', it.ico);
+                var tx = document.createElement('span');
+                tx.className = 'me-entry-txt';
+                var t1 = document.createElement('div');
+                t1.className = 'me-entry-t';
+                t1.textContent = it.txt;
+                var t2 = document.createElement('div');
+                t2.className = 'me-entry-s';
+                t2.textContent = it.sub;
+                tx.appendChild(t1); tx.appendChild(t2);
+                var ar = document.createElement('span');
+                ar.className = 'me-entry-arrow';
+                ar.textContent = '›';
+                row.appendChild(ic); row.appendChild(tx); row.appendChild(ar);
+                row.onclick = it.fn;
+                box.appendChild(row);
+            });
+        },
+
+        /** 当前会话的滚动位置存储 key */
+        _scrollKey() {
+            var c = this.conv;
+            if (!c) return null;
+            var me = (Store.me && Store.me.login) || '';
+            return 'fh:scroll:' + me + ':' + c.owner + '/' + c.name;
+        },
+
+        /** 绑定滚动保存（在 openConv 里调一次） */
+        _bindScrollSave() {
+            var box = document.getElementById('messages');
+            if (!box || box.__scrollBound) return;
+            var self = this;
+            box.__scrollBound = true;
+            var timer = null;
+            box.addEventListener('scroll', function () {
+                if (timer) return;
+                timer = setTimeout(function () {
+                    timer = null;
+                    var k = self._scrollKey();
+                    if (!k) return;
+                    try {
+                        // 贴底就不存了，下次直接到底（符合"有新消息"的预期）
+                        var atBottom = (box.scrollHeight - box.scrollTop -
+                            box.clientHeight) < 60;
+                        if (atBottom) global.localStorage.removeItem(k);
+                        else global.localStorage.setItem(k, String(box.scrollTop));
+                    } catch (e) { /* 配额满了就算了 */ }
+                }, 200);
+            }, { passive: true });
         },
 
         /** 消息指纹：只有条数和最后一条变了才重绘 */
