@@ -738,13 +738,33 @@
                     type: 'group',
                     name: repo.name,
                     owner: repo.owner.login,
-                    title: repo.name.replace(/^fhgrp-[^-]+-/, '') || '群聊',
+                    title: this._fallbackGroupTitle(repo.name, repo.owner.login),
                     avatar: null,
                     updatedAt: repo.updated_at,
                     private: repo.private
                 });
             }, this);
             return out;
+        },
+
+        /**
+         * 群聊在列表里的显示名
+         *
+         * ★ 之前用 repo.name.replace(/^fhgrp-[^-]+-/, '') 取名字，
+         *   但创建者的登录名本身可能带连字符（cool-zimo），
+         *   [^-]+ 只吃掉 "cool" → 剩下 "zimo-a6qmly"。
+         *   所以列表里会出现这种莫名其妙的仓库名碎片。
+         *
+         * 正确做法：先剥前缀，再剥末尾 6 位随机串，得到创建者登录名；
+         * 真名（group.json 的 name）打开过一次就缓存下来，之后直接用。
+         */
+        _fallbackGroupTitle(name, owner) {
+            var cached = this.ls('fh:gname:' + name);
+            if (cached) return cached;
+            var body = String(name)
+                .replace(/^fhgrp-/, '')
+                .replace(/-[a-z0-9]{6}$/i, '');
+            return (body || owner || '群聊') + ' 的群';
         },
 
         renderConvs() {
@@ -948,11 +968,46 @@
             });
             this.renderMessages(msgs);
             this.renderE2EBar(e2e, c);
+
+            /**
+             * ★ 对方还没接受邀请 → 明确告诉他为什么"对方没反应"
+             *
+             * 这是唯一的真实阻塞点：私聊仓库是私有的，
+             * 对方必须登录一次接受邀请才有读写权限。
+             * 接受之后就是异步的，不需要双方同时在线。
+             * 不说清楚的话，用户会以为消息没发出去，一直干等。
+             */
+            if (!msgs.some(function (m) {
+                    return m.from && String(m.from).toLowerCase() !==
+                        String(Store.me.login).toLowerCase();
+                })) {
+                var pend = await Chat.pendingInvite(c.owner, c.name, c.peer);
+                if (pend) {
+                    var tip = document.createElement('div');
+                    tip.className = 'invite-tip';
+                    tip.innerHTML =
+                        '<b>邀请已发出，等待 ' +
+                        '<span class="mono"></span></b> 接受' +
+                        '<div class="invite-tip-sub">会话仓库是私有的，' +
+                        '对方需要登录 FaceHub 并接受一次邀请才能收到消息。' +
+                        '接受之后就是异步的，不要求双方同时在线。</div>';
+                    tip.querySelector('.mono').textContent = c.peer || '对方';
+                    var mb = document.getElementById('e2e-bar');
+                    if (mb && mb.parentNode) {
+                        mb.parentNode.insertBefore(tip, mb.nextSibling);
+                    }
+                }
+            }
         },
 
         async openGroup(c) {
             var meta = await Group.meta(c.owner, c.name);
             this.current.meta = meta;
+            // 缓存真名：下次进列表直接显示群名，不用再读 group.json
+            if (meta && meta.name) {
+                this.ls('fh:gname:' + c.name, meta.name);
+                c.title = meta.name;
+            }
             // 昵称是本地备注，优先级最高；否则用群名（所有人共享）
             document.getElementById('chat-title').textContent =
                 this.getNick(c.owner, c.name) || meta.name || c.title;
