@@ -103,10 +103,116 @@
                     return new Date(b.updatedAt) - new Date(a.updatedAt);
                 });
 
+            /**
+             * ★ 同名会话去重
+             *
+             * 仓库名 fbdm-{a}-{b} 是确定性的，但**归属账号不唯一**：
+             * 两个人各自点了"发消息"，就会各自在自己账号下建一个同名仓库
+             * （GitHub 允许不同 owner 下有同名仓库），于是同一个会话变成两个。
+             *
+             * 后果很隐蔽：A 写进 A 名下那份，B 打开的是 B 名下那份，
+             * 两边永远是空的 —— 看起来就像"必须对方在线才收得到"。
+             *
+             * 解决：约定**规范 owner = 双方登录名排序后的第一个**。
+             * 两边算出来必然相同，于是都选中同一份仓库。
+             * 规范那份不存在时，退化为"创建最早的那一 份"（双方看到的顺序一致）。
+             */
+            rooms = Chat._dedupeRooms(rooms);
+
             var newEtag = r.__headers.get('etag');
             if (newEtag) API._ls(ek, newEtag);
             API._ls(ck, JSON.stringify(rooms));
             return rooms;
+        },
+
+        /**
+         * 会话仓库的"规范 owner"
+         *
+         * 双方登录名排序后取第一个 —— 两边算出来必然是同一个账号，
+         * 所以能就"这个会话该用哪份仓库"达成一致。
+         *
+         * 不能从仓库名里切：登录名本身可能带连字符（如 cool-zimo）。
+         */
+        canonicalOwner: function (roomName, me, peer) {
+            if (global.Group && global.Group.isGroup &&
+                global.Group.isGroup(roomName)) {
+                return null;                    // 群本来就只有一个 owner
+            }
+            var a = String(me || '').toLowerCase();
+            var b = String(peer || '').toLowerCase();
+            if (!a || !b) return null;
+            return a < b ? a : b;
+        },
+
+        /**
+         * 同名仓库只保留一份
+         *
+         * ★ 打分而不是顺序替换，否则会选错：
+         *   先来的正好是规范那份，后面那份"更旧"就把规范的那份顶掉了
+         *   —— 实测就踩了这个坑，结果选到了非规范那份。
+         *
+         * 优先级：① 规范 owner ② 创建更早（双方看到的顺序一致）
+         */
+        _dedupeRooms: function (rooms) {
+            var me = (global.Store && global.Store.me &&
+                global.Store.me.login) || '';
+
+            function score(r) {
+                var want = Chat.canonicalOwner(r.name, me, r.peer);
+                var canon = (want && String(r.owner).toLowerCase() === want) ? 1 : 0;
+                var t = new Date(r.updatedAt || 0).getTime();
+                return { canon: canon, t: t };
+            }
+            function better(a, b) {
+                if (a.canon !== b.canon) return a.canon > b.canon;
+                return a.t < b.t;                 // 更早的优先
+            }
+
+            var byName = {};
+            var best = {};
+            var out = [];
+            rooms.forEach(function (r) {
+                var cur = byName[r.name];
+                if (!cur) {
+                    byName[r.name] = r;
+                    best[r.name] = score(r);
+                    out.push(r);
+                    return;
+                }
+                if (better(score(r), best[r.name])) {
+                    var idx = out.indexOf(cur);
+                    out[idx] = r;
+                    byName[r.name] = r;
+                    best[r.name] = score(r);
+                }
+            });
+            return out;
+        },
+
+        /**
+         * 这个会话是否还有"待对方接受"的邀请
+         *
+         * ★ 这是"为什么对方不上线就聊不了"的唯一真实原因：
+         *   会话仓库是私有的，我建完要邀请对方，
+         *   对方必须**登录一次并接受邀请**才拿得到读写权限。
+         *   在那之前他根本看不到这个会话 —— 不是消息没发出去。
+         *   接受一次之后就是完全异步的，不需要双方同时在线。
+         *
+         * 所以界面必须把这件事说清楚，否则用户会一直干等。
+         */
+        async pendingInvite(owner, repo, peer) {
+            try {
+                var r = await API.req('/repos/' + owner + '/' + repo + '/invitations');
+                var list = r.data || [];
+                var p = String(peer || '').toLowerCase();
+                for (var i = 0; i < list.length; i++) {
+                    var li = list[i] && list[i].invitee;
+                    if (li && String(li.login || li).toLowerCase() === p) return true;
+                }
+                return list.length > 0;
+            } catch (e) {
+                return false;      // 没权限查（不是 owner）→ 当作没有
+            }
         },
 
         // ── 发起会话 ───────────────────────────────────────────
