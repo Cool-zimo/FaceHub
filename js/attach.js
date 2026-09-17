@@ -614,7 +614,6 @@ var Attach = {
             box.appendChild(el);
             return el;
         }
-            img.onclick = function () { self.preview(att, ctx); };
 
         if (kind === 'video' || kind === 'audio') {
             var cover = document.createElement('div');
