@@ -150,22 +150,65 @@
             this.bindUI();
         },
 
-        /** 其他应用已登录 → 显示"沿用账号" */
+        /**
+         * 其他应用已登录 → 显示"检测到 XXX 已登录"
+         *
+         * ★ 之前只写死了"检测到已登录"，看不出是从哪个应用带过来的，
+         *   而且依赖 getSavedUser() —— 那个只在同应用登录过才有值。
+         *   现在走 Bridge.findLoggedInOther()：三个应用里任意一个
+         *   登录过都能识别，并把应用名显示出来（如"GitHub Drive"）。
+         *
+         * ★ 时序：bridge.js 用普通 <script> 同步加载，但本函数
+         *   可能在 DOM 还没就绪时被调用 —— 所以调用点必须放在
+         *   DOMContentLoaded 之后（见底部启动逻辑）。
+         */
         showBridgeHint() {
-            var user = this.getSavedUser();
             var box = document.getElementById('bridge-box');
-            if (!box || !user) return;
-            document.getElementById('bridge-name').textContent = user.login;
+            if (!box) return;
+
+            var B = global.Bridge;
+            if (!B) { box.style.display = 'none'; return; }
+
+            var found = B.findLoggedInOther();
+            if (!found) { box.style.display = 'none'; return; }
+
+            var app = found.app;
+            var user = found.user || this.getSavedUser() || {};
+
+            // 标题：明确指出来源应用
+            var label = document.getElementById('bridge-label');
+            if (label) label.textContent = '检测到 ' + app.name + ' 已登录';
+
+            var nm = document.getElementById('bridge-name');
+            if (nm) nm.textContent = (user && user.login) || '（已保存的账号）';
+
             var av = document.getElementById('bridge-avatar');
-            if (av && user.avatar_url) {
-                av.innerHTML = '<img src="' + this.esc(user.avatar_url) + '" style="width:22px;height:22px;border-radius:4px;vertical-align:-6px;margin-right:5px">';
+            if (av) {
+                if (user && user.avatar_url) {
+                    av.innerHTML = '<img src="' + this.esc(user.avatar_url) +
+                        '" style="width:22px;height:22px;border-radius:4px;vertical-align:-6px;margin-right:5px">';
+                } else {
+                    av.textContent = app.icon || '';
+                }
             }
+
+            var note = document.getElementById('bridge-note');
+            if (note) {
+                note.textContent = app.icon + ' ' + app.name +
+                    ' · 令牌只在你本机浏览器里，不会上传';
+            }
+
             box.style.display = '';
+
             var self = this;
-            document.getElementById('bridge-use').onclick = function () {
-                var t = self.getToken();
-                if (t) self.enter(t);
-            };
+            var use = document.getElementById('bridge-use');
+            if (use) {
+                use.onclick = function () {
+                    var t = self.getToken() || (B && B.findToken());
+                    if (!t) return self.toast('没找到可用令牌', true);
+                    self.enter(t);
+                };
+            }
         },
 
         bindLogin() {
@@ -336,9 +379,6 @@
             document.getElementById('moments-post').onclick = function () {
                 self.postMoment();
             };
-            document.getElementById('moments-back').onclick = function () {
-                self.hideMoments();
-            };
             Array.prototype.forEach.call(
                 document.querySelectorAll('.nav-btn[data-tab="moments"]'),
                 function (b) { b.onclick = function () { self.showMoments(); }; }
@@ -348,9 +388,6 @@
                 self._momentsPage++;
                 self.loadMoments(true);
             };
-            var mb = document.getElementById('me-back');
-            if (mb) mb.onclick = function () { self.hideMe(); };
-
             // 小程序
             Array.prototype.forEach.call(
                 document.querySelectorAll('.nav-btn[data-tab="apps"]'),
@@ -361,24 +398,13 @@
                 document.querySelectorAll('.nav-btn[data-tab="discover"]'),
                 function (b) { b.onclick = function () { self.showDiscover(); }; }
             );
-            var db = document.getElementById('discover-back');
-            if (db) db.onclick = function () { self._hideAllPanes(null); self.switchTab('chats'); };
             var dg = document.getElementById('discover-go');
             if (dg) dg.onclick = function () { self.searchPeople(); };
             var di = document.getElementById('discover-input');
             if (di) di.onkeydown = function (e) {
                 if (e.key === 'Enter') self.searchPeople();
             };
-            var pb = document.getElementById('profile-back');
-            if (pb) pb.onclick = function () {
-                var pp = document.getElementById('profile-pane');
-                if (pp) pp.style.display = 'none';
-                var dp = document.getElementById('discover-pane');
-                if (dp) dp.style.display = 'flex';
-            };
-
-            var ab = document.getElementById('apps-back');
-            if (ab) ab.onclick = function () { self.hideApps(); };
+            // 面板关闭按钮走事件委托（_bindPaneCloses），不用逐个绑
             var as = document.getElementById('apps-search');
             if (as) as.onclick = function () { self.searchApps(); };
             var ac = document.getElementById('apps-close');
@@ -1182,20 +1208,25 @@
             // 只在原本就贴着底部时才跟到底部；否则维持原位置
             if (wasAtBottom) {
                 box.scrollTop = box.scrollHeight;
-            } else if (this._pendingScroll) {
-                // 图片是异步加载的，高度会变，直接设不准 —— 分两次调
-                var want = this._pendingScroll;
-                this._pendingScroll = 0;
-                box.scrollTop = want;
-                setTimeout(function () {
-                    // 只修正，不覆盖用户这期间的主动滚动
-                    if (Math.abs(box.scrollTop - want) > 40 &&
-                        box.scrollTop < want) {
-                        box.scrollTop = want;
-                    }
-                }, 260);
             } else {
-                box.scrollTop = keepTop;
+                box.scrollTop = keepTop || this._pendingScroll || 0;
+            }
+
+            /**
+             * ★ 恢复"上次浏览位置"必须重试
+             *
+             * 之前只设一次 scrollTop，结果经常无效：
+             *   ① 消息是异步解密/加载的，设定时 box.scrollHeight 还很矮，
+             *      scrollTop 被浏览器夹到 0（超出范围自动修正）
+             *   ② 图片/附件异步加载后高度再变，位置又偏了
+             *
+             * 所以：多次尝试，直到 scrollHeight 足够高、位置真的设上去，
+             * 或用户自己滚了（那时就不要再抢）。
+             */
+            var want = this._pendingScroll;
+            if (want > 0 && !wasAtBottom) {
+                this._pendingScroll = 0;
+                this._restoreScroll(box, want);
             }
         },
 
@@ -2046,22 +2077,42 @@
         // ══════════════════════════════════════════════════════
 
         showDiscover() {
-            var pane = document.getElementById('discover-pane');
-            this._hideAllPanes(pane);
-            if (pane) pane.style.display = 'flex';
-            this.mountIcons();
+            this._openPane('discover-pane');
             this.loadDiscover();
         },
 
-        /** 隐藏所有全屏面板，只留一个 */
+        /**
+         * 隐藏所有面板，只留一个
+         *
+         * ★ 面板现在在 #content-col 里（右侧内容区），
+         *   左侧导航 + 会话列表始终可见 —— 之前是整个 #app 被盖住，
+         *   看着像"换了页"，而且没有明显的退出按钮。
+         *
+         * except=null 表示全部关掉，回到聊天区。
+         */
+        PANES: ['moments-pane', 'apps-pane', 'me-pane', 'profile-pane', 'discover-pane'],
+
         _hideAllPanes(except) {
-            ['moments-pane', 'apps-pane', 'me-pane', 'profile-pane', 'discover-pane']
-                .forEach(function (id) {
-                    var el = document.getElementById(id);
-                    if (el && el !== except) el.style.display = 'none';
-                });
-            var app = document.getElementById('app');
-            if (app) app.style.display = (except ? 'none' : '');
+            var self = this;
+            this.PANES.forEach(function (id) {
+                var el = document.getElementById(id);
+                if (!el) return;
+                if (el !== except) {
+                    el.style.display = 'none';
+                    // 关闭即卸载：小程序 iframe 别留后台跑
+                    if (id === 'apps-pane') self.closeApp();
+                }
+            });
+        },
+
+        /** 打开某个面板（统一入口，保证标题栏图标被挂载） */
+        _openPane(id) {
+            this._hideAllPanes(document.getElementById(id));
+            var el = document.getElementById(id);
+            if (el) el.style.display = 'flex';
+            this.mountIcons();
+            this._bindPaneCloses();
+            return el;
         },
 
         /** 默认展示：已关注的人 + 可能认识（会话里的对象） */
@@ -2247,9 +2298,7 @@
 
         // ── 某人主页 ─────────────────────────────────────
         async showProfile(login) {
-            var pane = document.getElementById('profile-pane');
-            this._hideAllPanes(pane);
-            if (pane) pane.style.display = 'flex';
+            this._openPane('profile-pane');
             var title = document.getElementById('profile-title');
             if (title) title.textContent = login;
 
@@ -2337,24 +2386,12 @@
         // ══════════════════════════════════════════════════════
 
         async showApps() {
-            var pane = document.getElementById('apps-pane');
-            var app = document.getElementById('app');
-            var mp = document.getElementById('moments-pane');
-            var me = document.getElementById('me-pane');
-            if (mp) mp.style.display = 'none';
-            if (me) me.style.display = 'none';
-            if (app) app.style.display = 'none';
-            if (pane) pane.style.display = 'flex';
-            this.mountIcons();
+            this._openPane('apps-pane');
             await this.loadApps();
         },
 
         hideApps() {
-            var pane = document.getElementById('apps-pane');
-            var app = document.getElementById('app');
-            if (pane) pane.style.display = 'none';
-            if (app) app.style.display = '';
-            this.closeApp();
+            this.closePane();
         },
 
         async loadApps() {
@@ -2512,12 +2549,7 @@
         /** 「我」页面 */
         showMe() {
             var me = Store.me || {};
-            var pane = document.getElementById('me-pane');
-            var app = document.getElementById('app');
-            var mp = document.getElementById('moments-pane');
-            if (mp) mp.style.display = 'none';
-            if (app) app.style.display = 'none';
-            if (pane) pane.style.display = 'flex';
+            this._openPane('me-pane');
 
             var av = document.getElementById('me-avatar');
             if (av) {
@@ -2534,10 +2566,7 @@
         },
 
         hideMe() {
-            var pane = document.getElementById('me-pane');
-            var app = document.getElementById('app');
-            if (pane) pane.style.display = 'none';
-            if (app) app.style.display = '';
+            this.closePane();
         },
 
         /** 「我」页面的入口列表 */
@@ -2591,6 +2620,88 @@
                 row.onclick = it.fn;
                 box.appendChild(row);
             });
+        },
+
+        /**
+         * 绑定面板关闭按钮
+         *
+         * 之前每个面板各自绑一个 back 按钮，有的还没绑上，
+         * 结果"没有退出按钮"。现在统一用 [data-pane] 声明，
+         * 一次绑定，新增面板也不会漏。
+         */
+        _bindPaneCloses() {
+            if (this._paneCloseBound) return;
+            var self = this;
+            var root = document.getElementById('content-col');
+            if (!root) return;
+
+            root.addEventListener('click', function (e) {
+                var t = e.target;
+                while (t && t !== root) {
+                    if (t.classList && t.classList.contains('pane-close')) {
+                        self.closePane();
+                        return;
+                    }
+                    if (t.classList && t.classList.contains('pane-back')) {
+                        // 主页返回发现页
+                        self._hideAllPanes(document.getElementById('discover-pane'));
+                        var dp = document.getElementById('discover-pane');
+                        if (dp) dp.style.display = 'flex';
+                        return;
+                    }
+                    t = t.parentNode;
+                }
+            });
+            this._paneCloseBound = true;
+        },
+
+        /** 关闭当前面板，回到聊天区 */
+        closePane() {
+            this._hideAllPanes(null);
+            // 高亮导航回"聊天"
+            Array.prototype.forEach.call(
+                document.querySelectorAll('.nav-btn'),
+                function (b) {
+                    b.classList.toggle('active',
+                        b.getAttribute('data-tab') === 'chats');
+                });
+        },
+
+        /**
+         * 把滚动位置恢复到 want（带重试）
+         *
+         * 判定"成功"：scrollTop 已经接近 want。
+         * 判定"放弃"：用户自己滚动了（userMoved）或次数用尽。
+         */
+        _restoreScroll(box, want) {
+            var tries = 0;
+            var MAX = 20;                 // 20 × 120ms ≈ 2.4s，够图片加载了
+            var lastTop = -1;
+
+            function attempt() {
+                if (!box || !box.isConnected) return;
+                tries++;
+
+                // 用户自己滚了 → 立刻让位，别跟他抢
+                if (lastTop >= 0 && Math.abs(box.scrollTop - lastTop) > 8 &&
+                    box.scrollTop !== want) {
+                    return;
+                }
+                lastTop = box.scrollTop;
+
+                // 高度还不够（内容没加载完）→ 继续等
+                if (box.scrollHeight < want + box.clientHeight) {
+                    box.scrollTop = box.scrollHeight;   // 先顶到当前底部
+                    if (tries < MAX) return setTimeout(attempt, 120);
+                    return;
+                }
+
+                box.scrollTop = want;
+                if (Math.abs(box.scrollTop - want) > 8 && tries < MAX) {
+                    return setTimeout(attempt, 120);
+                }
+            }
+            attempt();
         },
 
         /** 当前会话的滚动位置存储 key */
@@ -2679,23 +2790,23 @@
 
         _momentsPage: 1,
 
+        /**
+         * 打开朋友圈
+         * 渲染在右侧内容区（#content-col），左侧导航和会话列表保持可见
+         */
         async showMoments() {
-            var mp = document.getElementById('moments-pane');
-            var app = document.getElementById('app');
-            // mp 是 app 的兄弟节点（不是子节点），所以两个 display 互不干扰。
-            // 之前 mp 嵌在 app 里面，藏 app 等于把它一起藏了。
-            if (mp) mp.style.display = 'flex';
-            if (app) app.style.display = 'none';
+            this._openPane('moments-pane');
             this._momentsPage = 1;
-            this.mountIcons();
+            var cam = document.getElementById('moments-camera');
+            if (cam && !cam.__bound) {
+                cam.__bound = true;
+                cam.onclick = function () { App.openComposer(); };
+            }
             await this.loadMoments();
         },
 
         hideMoments() {
-            var mp = document.getElementById('moments-pane');
-            var app = document.getElementById('app');
-            if (mp) mp.style.display = 'none';
-            if (app) app.style.display = '';
+            this.closePane();
         },
 
         async loadMoments(append) {
@@ -3047,37 +3158,190 @@
         },
 
         /** 发表朋友圈 */
-        async postMoment() {
-            var text = global.prompt('分享新鲜事：');
-            if (text === null) return;
+        /**
+         * 发朋友圈
+         *
+         * ★ 之前是 prompt + confirm 两连问，一点都不像微信。
+         *   现在做成真正的编辑页：文字区 + 九宫格 + 底部选项，
+         *   跟微信发朋友圈的布局对齐。
+         */
+        MAX_MOMENT_IMGS: 9,
 
-            var imgs = [];
-            var addMore = global.confirm('要配图吗？\n\n确定 = 选择图片，取消 = 直接发表');
-            if (addMore) {
-                var files = await Attach.pick(false);
-                if (files && files.length) {
-                    var parts = Attach.partition(files);
-                    if (parts.tooBig.length) {
-                        this.toast('「' + parts.tooBig[0].name + '」太大，已跳过', true);
-                    }
-                    for (var i = 0; i < parts.ok.length && i < 9; i++) {
-                        try {
-                            this.toast('上传中 ' + (i + 1) + '/' + parts.ok.length);
-                            imgs.push(await Moments.uploadImage(Store.me.login, parts.ok[i]));
-                        } catch (e) {
-                            this.toast('图片上传失败：' + (e.message || e), true);
-                        }
-                    }
-                }
+        openComposer() {
+            var self = this;
+            var col = document.getElementById('content-col');
+            if (!col) return;
+
+            // 已存在就复用（避免重复打开丢草稿）
+            var box = document.getElementById('composer-pane');
+            if (!box) {
+                box = document.createElement('section');
+                box.id = 'composer-pane';
+                box.className = 'pane-full composer-pane';
+                col.appendChild(box);
             }
 
+            var me = Store.me || {};
+            box.innerHTML =
+                '<header class="composer-head">' +
+                    '<button class="composer-cancel" id="cmp-cancel">取消</button>' +
+                    '<button class="composer-send" id="cmp-send">发表</button>' +
+                '</header>' +
+                '<div class="composer-body">' +
+                    '<textarea id="cmp-text" class="composer-text" ' +
+                        'placeholder="这一刻的想法…" maxlength="1000"></textarea>' +
+                    '<div id="cmp-grid" class="composer-grid"></div>' +
+                    '<div class="composer-rows">' +
+                        '<div class="composer-row"><span>谁可以看</span>' +
+                            '<span class="composer-row-v">公开</span></div>' +
+                        '<div class="composer-row" id="cmp-loc-row">' +
+                            '<span>所在位置</span>' +
+                            '<span class="composer-row-v" id="cmp-loc">（不显示）</span></div>' +
+                    '</div>' +
+                '</div>';
+
+            this._cmpImgs = [];       // {file, url(blob), name}
+            this.renderComposerGrid();
+
+            var cancel = document.getElementById('cmp-cancel');
+            if (cancel) cancel.onclick = function () { self.closeComposer(); };
+            var send = document.getElementById('cmp-send');
+            if (send) send.onclick = function () { self.postMoment(); };
+
+            // 位置：让用户输入，存进正文尾部（微信也是文本里带位置）
+            var locRow = document.getElementById('cmp-loc-row');
+            if (locRow) locRow.onclick = function () {
+                var v = global.prompt('所在位置（留空则不显示）：',
+                    (self._cmpLoc || ''));
+                if (v === null) return;
+                self._cmpLoc = v.trim();
+                var el = document.getElementById('cmp-loc');
+                if (el) el.textContent = self._cmpLoc || '（不显示）';
+            };
+
+            box.style.display = 'flex';
+            this.mountIcons();
+            setTimeout(function () {
+                var t = document.getElementById('cmp-text');
+                if (t) t.focus();
+            }, 60);
+        },
+
+        closeComposer() {
+            var box = document.getElementById('composer-pane');
+            if (box) box.style.display = 'none';
+            // 释放 blob URL，别占内存
+            (this._cmpImgs || []).forEach(function (it) {
+                if (it.url && global.URL && URL.revokeObjectURL) {
+                    try { URL.revokeObjectURL(it.url); } catch (e) {}
+                }
+            });
+            this._cmpImgs = [];
+            this._cmpLoc = '';
+        },
+
+        /** 九宫格：末位是 + 按钮 */
+        renderComposerGrid() {
+            var grid = document.getElementById('cmp-grid');
+            if (!grid) return;
+            var self = this;
+            grid.innerHTML = '';
+            var imgs = this._cmpImgs || [];
+
+            imgs.forEach(function (it, idx) {
+                var cell = document.createElement('div');
+                cell.className = 'cmp-cell';
+                var im = document.createElement('img');
+                im.src = it.url;
+                im.alt = '';
+                cell.appendChild(im);
+                var del = document.createElement('button');
+                del.className = 'cmp-del';
+                del.textContent = '✕';
+                del.onclick = function (e) {
+                    e.stopPropagation();
+                    if (it.url && global.URL && URL.revokeObjectURL) {
+                        try { URL.revokeObjectURL(it.url); } catch (err) {}
+                    }
+                    self._cmpImgs.splice(idx, 1);
+                    self.renderComposerGrid();
+                };
+                cell.appendChild(del);
+                grid.appendChild(cell);
+            });
+
+            if (imgs.length < this.MAX_MOMENT_IMGS) {
+                var add = document.createElement('button');
+                add.className = 'cmp-add';
+                add.innerHTML = '<span class="cmp-plus">+</span>' +
+                    '<span class="cmp-add-n">' + imgs.length + '/' + this.MAX_MOMENT_IMGS + '</span>';
+                add.onclick = function () { self.pickComposerImages(); };
+                grid.appendChild(add);
+            }
+        },
+
+        async pickComposerImages() {
+            var self = this;
+            var room = this.MAX_MOMENT_IMGS - (this._cmpImgs || []).length;
+            if (room <= 0) { this.toast('最多 9 张', true); return; }
+
             try {
-                await Moments.publish(Store.me.login, text, imgs);
+                var files = await Attach.pick(false);
+                if (!files || !files.length) return;
+                var parts = Attach.partition(files);
+                if (parts.tooBig.length) {
+                    this.toast('「' + parts.tooBig[0].name + '」超过 200MB，已跳过', true);
+                }
+                var ok = parts.ok.slice(0, room);
+                if (parts.ok.length > room) {
+                    this.toast('最多 9 张，多余的已忽略', true);
+                }
+                ok.forEach(function (f) {
+                    var url = (global.URL && URL.createObjectURL)
+                        ? URL.createObjectURL(f) : '';
+                    self._cmpImgs.push({ file: f, url: url, name: f.name });
+                });
+                this.renderComposerGrid();
+            } catch (e) {
+                this.toast('选择图片失败：' + (e.message || e), true);
+            }
+        },
+
+        async postMoment() {
+            var self = this;
+            var ta = document.getElementById('cmp-text');
+            var text = ta ? ta.value.trim() : '';
+            var imgs = this._cmpImgs || [];
+
+            if (!text && !imgs.length) {
+                this.toast('说点什么，或配张图', true);
+                return;
+            }
+
+            // 位置附加到正文（微信也是这么展示的）
+            if (this._cmpLoc) {
+                text = text ? (text + '\n📍 ' + this._cmpLoc) : ('📍 ' + this._cmpLoc);
+            }
+
+            var btn = document.getElementById('cmp-send');
+            if (btn) { btn.disabled = true; btn.textContent = '发表中…'; }
+
+            try {
+                var uploaded = [];
+                for (var i = 0; i < imgs.length; i++) {
+                    if (btn) btn.textContent = '上传 ' + (i + 1) + '/' + imgs.length;
+                    uploaded.push(await Moments.uploadImage(
+                        Store.me.login, imgs[i].file));
+                }
+                await Moments.publish(Store.me.login, text, uploaded);
                 this.toast('已发表');
+                this.closeComposer();
                 await this.loadMoments();
             } catch (e) {
                 this.toast('发表失败：' + (e.message || e), true);
                 if (global.console) console.error('[发表]', e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '发表'; }
             }
         },
 
