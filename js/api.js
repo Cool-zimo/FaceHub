@@ -321,6 +321,21 @@
             );
             // 写完立刻失效该仓库的 ETag，下次列目录才能拿到新文件
             this._ls('fh:etag:' + owner + '/' + repo, null);
+
+            /**
+             * ★ 还要失效这个文件的**内容缓存**
+             *
+             * 踩过的坑：只失效 ETag，不管 fh:c: 内容缓存。
+             * 于是"关注 → 立刻读关注列表"拿到的是写入前的旧值，
+             * 表现为"关注了但列表里没有"，要刷新才对。
+             *
+             * 内容缓存有两种形态（文本 / base64），都要清。
+             */
+            var base = 'fh:c:' + owner + '/' + repo + '/' + path;
+            this._ls(base, null);
+            this._ls(base + '|b64', null);
+            this._ls('fh:e:' + owner + '/' + repo + '/' + path, null);
+
             return r.data;
         },
 
