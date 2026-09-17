@@ -994,3 +994,45 @@ video.att-player { height: auto; max-height: 260px; }
     .att-ov-nav.next { right: 6px; }
     .moment-grid.n1 { grid-template-columns: minmax(0, 150px); }
 }
+
+/* ═══ 我（个人页） ═══════════════════════════════════════ */
+.me-pane {
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh;
+    background: #ededed; overflow: hidden;
+    max-width: 680px; margin: 0 auto;
+}
+.me-body { flex: 1; overflow-y: auto; min-height: 0; padding: 0 0 24px; }
+
+.me-card {
+    display: flex; align-items: center; gap: 16px;
+    padding: 22px 18px; background: #fff;
+    border-bottom: 1px solid #e6e6e6;
+    animation: msgIn var(--dur-slow) var(--ease) both;
+}
+.me-avatar {
+    width: 64px; height: 64px; border-radius: 6px;
+    object-fit: cover; background: #eee; flex-shrink: 0;
+}
+.me-id { flex: 1; min-width: 0; }
+.me-name { font-size: 19px; font-weight: 600; color: #111; }
+.me-login { font-size: 13.5px; color: #9a9a9a; margin-top: 3px; }
+
+.me-entries { margin-top: 12px; background: #fff; }
+.me-entry {
+    display: flex; align-items: center; gap: 12px;
+    width: 100%; padding: 13px 18px;
+    border: 0; border-bottom: 1px solid #f2f2f2; background: none;
+    text-align: left; font-size: 15px; color: #111;
+    transition: background var(--dur-fast) ease;
+}
+.me-entry:last-child { border-bottom: 0; }
+.me-entry:hover { background: #f7f7f7; }
+.me-entry:active { background: #efefef; }
+.me-entry-ico { color: #7a7a7a; flex-shrink: 0; display: flex; }
+.me-entry-txt { flex: 1; min-width: 0; }
+.me-entry-t { font-size: 15px; }
+.me-entry-s { font-size: 11.5px; color: #a8a8a8; margin-top: 2px; }
+.me-entry-arrow { color: #c8c8c8; font-size: 19px; flex-shrink: 0; }
+.me-entry.danger .me-entry-t { color: #d93025; }
+.me-entry.danger .me-entry-ico { color: #d93025; }
