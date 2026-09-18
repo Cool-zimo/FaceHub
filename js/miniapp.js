@@ -41,6 +41,14 @@
                 name: '仓鼠',
                 desc: '书签与配置同步',
                 builtin: true
+            },
+            {
+                id: 'builtin-ai',
+                owner: 'Cool-zimo',
+                repo: 'fhapp-ai-chat',
+                name: 'AI 聊天',
+                desc: '智谱 GLM / OpenAI 兼容 · 自带 Key',
+                builtin: true
             }
         ],
 
