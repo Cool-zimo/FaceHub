@@ -31,7 +31,14 @@
         sys: '你是在 FaceHub 里聊天的助手。回答简洁自然，像真人发消息，别用 Markdown，别分点列清单。',
         scope: 'all',               // all=所有私聊  current=仅当前打开的会话
         delay: 0,                   // 回复前装模作样等一下（毫秒）
-        maxLen: 500                 // 回复截断长度
+        maxLen: 500,                // 回复截断长度
+
+        // ── ★ 防无限循环（两个 AI 互聊会瞬间刷爆仓库）─────────
+        //   两边都开自动回复 = 死循环：A 回 B，B 回 A，永不停止。
+        //   实测过：3~7 秒一条，一小时能刷几千条。
+        maxChain: 3,                // 连续自动回复上限，达到就停
+        cooldown: 20000,            // 同一会话两次自动回复的最小间隔(ms)
+        stopOnRateLimit: true       // 被限速就彻底停下，别硬重试
     };
 
     var AIReply = {
@@ -87,6 +94,45 @@
         _tries: function (id) {
             var d = this._done();
             return d[id] ? (d[id].n || 1) : 0;
+        },
+
+        // ── 防循环状态 ────────────────────────────────────────
+        _state: function () {
+            try {
+                return JSON.parse(global.localStorage.getItem('fh:autoReplyState') || '{}');
+            } catch (e) { return {}; }
+        },
+
+        _setState: function (st) {
+            global.localStorage.setItem('fh:autoReplyState', JSON.stringify(st));
+        },
+
+        /** 连续自动回复了几条（真人插话会清零）*/
+        chain: function (convKey) {
+            return (this._state()[convKey] || {}).chain || 0;
+        },
+
+        /** 上次自动回复的时间戳 */
+        lastAt: function (convKey) {
+            return (this._state()[convKey] || {}).lastAt || 0;
+        },
+
+        _bump: function (convKey) {
+            var st = this._state();
+            var o = st[convKey] || {};
+            o.chain = (o.chain || 0) + 1;
+            o.lastAt = Date.now();
+            st[convKey] = o;
+            this._setState(st);
+        },
+
+        /** 真人发过话了 → 清零，AI 可以重新开始接 */
+        resetChain: function (convKey) {
+            var st = this._state();
+            if (st[convKey]) {
+                st[convKey].chain = 0;
+                this._setState(st);
+            }
         },
 
         /**
@@ -161,6 +207,45 @@
 
             if (!target) return;
 
+            // ═══ ★ 防无限循环 ═══════════════════════════════════
+
+            // ① 先判「真人插话」→ 清零
+            //    ★ 必须放在上限判断**之前**。
+            //      否则 chain 满了就直接 return，永远走不到清零，
+            //      结果是"停了就再也起不来" —— 功能等于没有。
+            //    ★ 判据是「会话最新一条是我发的」：
+            //      循环时 target 一直是对方那条，用 target 判断永远不成立。
+            //
+            //      正确判据：**上次自动回复之后，我有没有发过消息**。
+            //      有 → 真人打字了 → 清零。
+            //      只看"最新一条是不是我发的"是错的：
+            //      真人说一句、对方又回一句，最新一条又变成对方的了。
+            var chain = this.chain(convKey);
+            var sinceTs = this.lastAt(convKey);
+            var humanSpoke = false;
+            for (var k = 0; k < msgs.length; k++) {
+                var mk = msgs[k];
+                if (!mk || !mk.ts) continue;
+                if (mk.ts <= sinceTs) continue;          // 只看上次自动回复之后的
+                if (String(mk.from).toLowerCase() === me) { humanSpoke = true; break; }
+            }
+            if (humanSpoke) {
+                if (chain > 0) this.resetChain(convKey);
+                chain = 0;
+            }
+
+            // ② 连续上限：两边都开自动回复就是死循环（实测 3~7 秒一条）。
+            //    达到上限就停，等真人插话才继续。
+            if (chain >= (c.maxChain || 3)) {
+                return;
+            }
+
+            // ③ 冷却：同一会话两次自动回复之间至少间隔 cooldown
+            var since = Date.now() - this.lastAt(convKey);
+            if (this.lastAt(convKey) && since < (c.cooldown || 0)) {
+                return;
+            }
+
             // 作用域：scope=current 时只回当前打开的会话
             if (c.scope === 'current') {
                 var cur = opts.currentConv;
@@ -178,12 +263,22 @@
                 await opts.send(reply);
 
                 this._markDone(target.id, MAX_TRY);
+                this._bump(convKey);          // 连续计数 +1
                 // 回完把基线推到这条之后，避免下次又扫到它
                 this.setBaseline(convKey, target.ts);
             } catch (e) {
-                // 失败记一次，下次轮询会重试（最多 MAX_TRY 次）
-                this._markDone(target.id, this._tries(target.id) + 1);
-                if (global.console) console.warn('[AI自动回复]', e.message || e);
+                var msg = String((e && e.message) || e);
+
+                // ★ 被限速：直接塞满重试次数，别硬顶。
+                //   继续重试只会让限流更狠，而且对方 AI 还在等着回，
+                //   两边一起重试就是雪崩。
+                if (/限流|429/i.test(msg) && c.stopOnRateLimit !== false) {
+                    this._markDone(target.id, MAX_TRY);
+                    if (global.console) console.warn('[AI自动回复] 已限速，停止重试：' + msg);
+                } else {
+                    this._markDone(target.id, this._tries(target.id) + 1);
+                }
+                if (global.console) console.warn('[AI自动回复]', msg);
             } finally {
                 this._busy = false;
             }
