@@ -438,6 +438,8 @@ input, textarea { font-family: inherit; }
     .app.show-chat .chat-pane { transform: none; }
 }
 
+
+
 /* ═══ 待接受邀请 ════════════════════════════════════════ */
 .invite-banner {
     background: #fff8e6; border-bottom: 1px solid #ffe4a0;
@@ -1405,3 +1407,40 @@ video.att-player { height: auto; max-height: 260px; }
 .moment-cimg:hover { opacity: .88; }
 .moment-cimg:active { transform: scale(.96); }
 .moment-cimg.skeleton { opacity: .35; }
+
+/**
+ * ★ 窄屏：面板必须改成 fixed 全屏
+ *
+ * 为什么：单列布局下 .chat-pane 变成 position:fixed 脱离了流，
+ * 于是 #content-col 在 grid 里被挤成高度 0 —— 而 .pane-full 是
+ * absolute + inset:0，相对于这个 0 高的父容器，结果就是完全看不见。
+ *
+ * 现象：点朋友圈/小程序/我 一片空白，像是被挤出屏幕。
+ * 修法：跟 chat-pane 一样用 fixed，z-index 比它高一层。
+ */
+@media (max-width: 768px) {
+    .pane-full {
+        position: fixed; inset: 0; z-index: 70;
+        height: 100dvh; width: 100vw;
+    }
+    /* 底部 tab 被盖住时，面板自己的 ✕ 就是退路（已经绑好了） */
+    .pane-full .moments-head {
+        padding-top: calc(8px + env(safe-area-inset-top));
+        height: auto; min-height: 48px;
+    }
+    /* 内容区也要避开 iPhone 底部横条 */
+    .pane-full .me-body,
+    .pane-full .moments-list,
+    .pane-full .apps-list,
+    .pane-full .discover-body {
+        padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    }
+}
+
+/**
+ * 横屏矮屏（比如手机横过来、或小窗口）
+ * 桌面断点内但高度不够时，面板同样会被压扁 —— 保险起见也走 fixed
+ */
+@media (min-width: 769px) and (max-height: 480px) {
+    .pane-full { position: fixed; inset: 0; z-index: 70; }
+}
