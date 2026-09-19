@@ -2731,6 +2731,22 @@
                   '</span>' +
                 '</div>' +
                 '<div class="info-row">' +
+                  '<span class="info-label">连续上限<br><i class="lbl-tip">防 AI 互聊</i></span>' +
+                  '<span class="edit-cell">' +
+                    '<input id="ar-chain" class="inline-input" type="number" min="1"' +
+                    ' max="20" value="' + (c.maxChain || 3) + '">' +
+                    '<i class="lbl-tip">条</i>' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span class="info-label">冷却<br><i class="lbl-tip">两次回复间隔</i></span>' +
+                  '<span class="edit-cell">' +
+                    '<input id="ar-cool" class="inline-input" type="number" min="0"' +
+                    ' max="600000" step="5000" value="' + (c.cooldown || 20000) + '">' +
+                    '<i class="lbl-tip">毫秒</i>' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
                   '<span></span>' +
                   '<span>' +
                     '<button id="ar-test" class="btn-soft btn-sm">测试连接</button>' +
@@ -2740,7 +2756,9 @@
                 '<p class="hint">' +
                   '只在<b>这个页面开着</b>的时候生效 —— 没有服务端，纯靠轮询。<br>' +
                   '首次开启会把当前最后一条记为基线，<b>不会</b>回复历史消息。<br>' +
-                  '群聊不自动接话。回复同样端到端加密。' +
+                  '群聊不自动接话。回复同样端到端加密。<br>' +
+                  '<b style="color:#c33">⚠ 两边都开自动回复会无限互聊。</b>' +
+                  '连续回满上限条就自动停，真人插话后恢复。' +
                 '</p>';
 
             var body = document.getElementById('info-body');
@@ -2754,7 +2772,9 @@
                     model: document.getElementById('ar-model').value,
                     scope: document.getElementById('ar-scope').value,
                     sys: document.getElementById('ar-sys').value.trim(),
-                    delay: parseInt(document.getElementById('ar-delay').value, 10) || 0
+                    delay: parseInt(document.getElementById('ar-delay').value, 10) || 0,
+                    maxChain: parseInt(document.getElementById('ar-chain').value, 10) || 3,
+                    cooldown: parseInt(document.getElementById('ar-cool').value, 10) || 0
                 };
                 if (v.on && !v.key) {
                     self.toast('要先填 API Key', true);
