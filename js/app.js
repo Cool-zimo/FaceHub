@@ -2104,12 +2104,58 @@
                 if (msgs.length) {
                     this.markSeen(c, msgs[msgs.length - 1].ts);
                 }
+
+                // AI 自动回复（只对私聊生效 —— 群里自动接话太吵）
+                this._autoReply(c, msgs);
             } catch (e) {
                 // 静默但不完全无声：控制台留痕，方便排查
                 if (global.console) console.warn('[轮询] 刷新失败', e.message);
             } finally {
                 this._polling = false;              // 出错也必须解锁
             }
+        },
+
+        /**
+         * AI 自动回复
+         *
+         * 只在私聊生效：群里自动接话太吵，而且容易两个人开着打起来。
+         * 不 await —— 它要等 AI 好几秒，卡在这儿会把轮询堵死
+         * （refreshCurrent 有防重入，但 finally 要等它结束才解锁）。
+         */
+        _autoReply(c, msgs) {
+            var AR = global.AIReply;
+            if (!AR || !AR.ready()) return;
+            if (c.type !== 'dm') return;
+            if (!Store.me || !Store.me.login) return;
+
+            var self = this;
+            var e2e = this.e2eState || {};
+
+            // ★ 一定要设基线：开启的那一刻把最新一条记下来，
+            //   之后只回比它新的。否则一开启就会把全部历史回一遍。
+            var convKey = c.owner + '/' + c.name;
+            if (!AR.baseline(convKey)) {
+                var last = msgs[msgs.length - 1];
+                AR.setBaseline(convKey, (last && last.ts) || Date.now());
+                return;
+            }
+
+            AR.maybeReply(c, msgs, {
+                myLogin: Store.me.login,
+                peerPub: e2e.peerPub,
+                currentConv: this.current,
+                send: async function (text) {
+                    await Chat.send(c.owner, c.name, text, {
+                        myLogin: Store.me.login,
+                        peerPub: e2e.peerPub
+                    });
+                    // 发完立刻重拉一次，别等下一个轮询周期
+                    API.clearMessageCache(c.owner, c.name);
+                    self._lastSig = null;
+                }
+            }).catch(function (e) {
+                if (global.console) console.warn('[AI自动回复]', e && e.message);
+            });
         },
 
         /**
@@ -2624,6 +2670,121 @@
             this.closePane();
         },
 
+        // ══════════════════════════════════════════════════════
+        //  AI 自动回复设置
+        // ══════════════════════════════════════════════════════
+        openAutoReply() {
+            var AR = global.AIReply;
+            if (!AR) { this.toast('模块没加载', true); return; }
+            var c = AR.cfg();
+            var self = this;
+
+            var opts = AR.MODELS.map(function (m) {
+                return '<option value="' + m.id + '"' +
+                    (m.id === c.model ? ' selected' : '') + '>' +
+                    m.name + '</option>';
+            }).join('');
+
+            var html = '' +
+                '<div class="info-row">' +
+                  '<span class="info-label">启用<br><i class="lbl-tip">只对私聊生效</i></span>' +
+                  '<span><input type="checkbox" id="ar-on"' +
+                    (c.on ? ' checked' : '') + '></span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span class="info-label">API Key</span>' +
+                  '<span class="edit-cell">' +
+                    '<input id="ar-key" class="inline-input grow" type="password"' +
+                    ' value="' + this.esc(c.key) + '" placeholder="智谱的 key">' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span class="info-label">模型</span>' +
+                  '<span class="edit-cell">' +
+                    '<select id="ar-model" class="inline-input grow">' + opts + '</select>' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span class="info-label">范围</span>' +
+                  '<span class="edit-cell">' +
+                    '<select id="ar-scope" class="inline-input grow">' +
+                      '<option value="all"' + (c.scope === 'all' ? ' selected' : '') +
+                        '>所有私聊</option>' +
+                      '<option value="current"' + (c.scope === 'current' ? ' selected' : '') +
+                        '>仅当前打开的会话</option>' +
+                    '</select>' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span class="info-label">人设<br><i class="lbl-tip">怎么回，随你写</i></span>' +
+                  '<span class="edit-cell">' +
+                    '<textarea id="ar-sys" class="inline-input grow" rows="3">' +
+                      this.esc(c.sys) + '</textarea>' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span class="info-label">延迟<br><i class="lbl-tip">装作在打字</i></span>' +
+                  '<span class="edit-cell">' +
+                    '<input id="ar-delay" class="inline-input" type="number" min="0"' +
+                    ' max="10000" step="500" value="' + (c.delay || 0) + '">' +
+                    '<i class="lbl-tip">毫秒</i>' +
+                  '</span>' +
+                '</div>' +
+                '<div class="info-row">' +
+                  '<span></span>' +
+                  '<span>' +
+                    '<button id="ar-test" class="btn-soft btn-sm">测试连接</button>' +
+                    '<button id="ar-save" class="btn-primary btn-sm">保存</button>' +
+                  '</span>' +
+                '</div>' +
+                '<p class="hint">' +
+                  '只在<b>这个页面开着</b>的时候生效 —— 没有服务端，纯靠轮询。<br>' +
+                  '首次开启会把当前最后一条记为基线，<b>不会</b>回复历史消息。<br>' +
+                  '群聊不自动接话。回复同样端到端加密。' +
+                '</p>';
+
+            var body = document.getElementById('info-body');
+            body.innerHTML = '<h4 class="sec-h">AI 自动回复</h4>' + html;
+            document.getElementById('info-modal').style.display = '';
+
+            document.getElementById('ar-save').onclick = function () {
+                var v = {
+                    on: document.getElementById('ar-on').checked,
+                    key: document.getElementById('ar-key').value.trim(),
+                    model: document.getElementById('ar-model').value,
+                    scope: document.getElementById('ar-scope').value,
+                    sys: document.getElementById('ar-sys').value.trim(),
+                    delay: parseInt(document.getElementById('ar-delay').value, 10) || 0
+                };
+                if (v.on && !v.key) {
+                    self.toast('要先填 API Key', true);
+                    return;
+                }
+                AR.save(v);
+                self.toast(v.on ? '已开启' : '已关闭');
+                self.closeInfo();
+                self.renderMeEntries();
+            };
+
+            document.getElementById('ar-test').onclick = async function () {
+                var btn = this;
+                btn.disabled = true;
+                btn.textContent = '测试中…';
+                var v = {
+                    key: document.getElementById('ar-key').value.trim(),
+                    model: document.getElementById('ar-model').value
+                };
+                try {
+                    var r = await AR.test(v);
+                    global.alert(r.text);
+                } catch (e) {
+                    global.alert('测试失败：' + (e.message || e));
+                }
+                btn.disabled = false;
+                btn.textContent = '测试连接';
+            };
+        },
+
         /** 「我」页面的入口列表 */
         renderMeEntries() {
             var box = document.getElementById('me-entries');
@@ -2631,7 +2792,13 @@
             var self = this;
             box.innerHTML = '';
 
+            var AR = global.AIReply;
+            var arOn = AR ? AR.ready() : false;
+
             var items = [
+                { ico: 'chat', txt: 'AI 自动回复',
+                  sub: arOn ? '已开启 · 私聊自动接话' : '收到消息自动回（私聊）',
+                  fn: function () { self.openAutoReply(); } },
                 { ico: 'heart', txt: '密钥备份', sub: '换设备时用它恢复',
                   fn: function () { self.openKeyModal(); } },
                 { ico: 'shield', txt: '安全码', sub: '线下核对，防密钥被换',
