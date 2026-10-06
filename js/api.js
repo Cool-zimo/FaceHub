@@ -64,7 +64,11 @@
             var resp = await fetch('https://api.github.com' + path, {
                 method: opts.method || 'GET',
                 headers: headers,
-                body: body
+                body: body,
+                /* 消息随时会来，不能被浏览器缓存 60 秒。
+                   注意：这里自己发 If-None-Match，304 省配额的机制
+                   不依赖浏览器缓存，加了 no-store 后照样有效。 */
+                cache: 'no-store'
             });
 
             // 304 是条件请求命中，GitHub 明确不扣配额 → 计为免费
